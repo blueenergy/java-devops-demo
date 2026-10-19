@@ -66,10 +66,20 @@ spec:
         # 第 4 步：全量
         - setWeight: 100
 
-      # 发布过程中不缩容旧版本，保证任何时刻都有完整容量的稳定版本兜底。
-      # 代价是发布期间资源占用翻倍，需要集群有足够余量。
-      # 集群紧张时改成 0，但那样回滚会变慢（要先扩容再切流量）。
-      scaleDownDelaySeconds: 30
+      # 这里【不】显式设置 scaleDownDelaySeconds。
+      #
+      # 直觉上想写 scaleDownDelaySeconds: 30 来保证「旧 Pod 在发布后多活一会儿，
+      # 回滚时能秒切回去」。但 Argo Rollouts 的准入校验会直接拒绝：
+      #   spec.strategy.scaleDownDelaySeconds: Invalid value: 30:
+      #   Canary scaleDownDelaySeconds can only be used with traffic routing
+      #
+      # 原因：这个字段的语义是「切换流量后延迟多久缩容旧 ReplicaSet」，
+      # 只有在配置了 trafficRouting（Istio / Nginx Ingress / Gateway API）
+      # 才有意义。没有流量路由器时，新旧版本靠副本数比例共享流量，
+      # 「延迟缩容」无从谈起。
+      #
+      # 默认值本来就是 30 秒，不写等价于现在的行为。
+      # 这个错误只有 apply 到真实集群才会暴露 —— 静态校验和渲染都看不出来。
 
   template:
     metadata:

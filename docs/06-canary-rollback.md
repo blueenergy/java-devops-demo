@@ -55,8 +55,19 @@ Argo 通过修改**两个 Service 的 selector** 来导流，而不是去改 Pod
             canary ──▶ (空)
 ```
 
-因为 `scaleDownDelaySeconds: 30` 让旧 ReplicaSet 不立即缩容，
-旧 Pod 还活着，所以回滚不需要等新 Pod 启动 —— **这是 MTTR 的关键**。
+**回滚快的关键是「金丝雀期间 stable 的副本数一直保持满编」**，不是延迟缩容。
+发布进行中时，stable ReplicaSet 始终是完整容量，canary 只是额外多加几个 Pod；
+中止发布只需把 selector 切回去，**不需要等新 Pod 启动** —— 这是 MTTR 的核心。
+
+> 补充一个容易误解的点：在**没有配置 trafficRouting** 时，
+> Argo Rollouts 会拒绝显式设置 `canary.scaleDownDelaySeconds`
+> （`Canary scaleDownDelaySeconds can only be used with traffic routing`）。
+> 因为该字段的语义是「流量切完后延迟多久缩容旧 ReplicaSet」，
+> 没有流量路由器时无从谈起。所以本仓库没有显式设置它。
+>
+> 这意味着**全量发布完成之后**，旧 ReplicaSet 会被缩容；
+> 此时若要回滚，需要按旧 revision 重新拉起 Pod（仍比重新构建快得多，
+> 但要等容器启动）。金丝雀过程中中止则没有这个代价。
 
 ---
 
@@ -88,6 +99,25 @@ kubectl apply --server-side --force-conflicts -n argo-rollouts \
 
 另外别忘了单独安装 `kubectl-argo-rollouts` 插件 —— CRD 只让集群认识资源，
 `kubectl argo rollouts ...` 这条子命令来自独立的插件，不装会报 `unknown command`。
+
+**坑三：Argo 的准入校验无法离线预检。**
+
+真实踩到的一条：
+
+```
+spec.strategy.scaleDownDelaySeconds: Invalid value: 30:
+Canary scaleDownDelaySeconds can only be used with traffic routing
+```
+
+这类规则写在 Argo Rollouts 的控制器的**准入 webhook** 里，
+既不在 CRD 的 OpenAPI schema 中，也不是 kubeconform 能查的东西。
+所以：
+
+- 渲染通过、schema 校验通过，不代表能 apply
+- **改 Rollout / AnalysisTemplate 的 spec 必须有一个真实集群来试**，
+  哪怕是一次性的 kind
+
+这也是 CD 流水线存在的意义之一：它就是一个随时可用的、用完即弃的验证集群。
 
 ## 三、一个必须说清楚的局限：权重是近似的
 

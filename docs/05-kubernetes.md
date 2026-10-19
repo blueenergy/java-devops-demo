@@ -38,7 +38,7 @@ steps:
 |---|---|
 | 先 `setWeight` 再 `pause` 30s | 让新 Pod 有机会暴露问题。太短会让分析跑在冷启动阶段（误判），太长会拖慢发布节奏 |
 | 分析失败 → 自动回滚 | 银行场景下 MTTR 是核心指标，能自动回滚的就不该等人 |
-| `scaleDownDelaySeconds: 30` | 发布中不缩容旧版本，保证任何时刻都有完整容量的稳定版本兜底。代价是资源占用翻倍 |
+| **不**显式设 `scaleDownDelaySeconds` | 无 `trafficRouting` 时 Argo 的准入校验会拒绝这个字段（`can only be used with traffic routing`）。金丝雀期间 stable 本身保持满编，兜底已由副本策略保证 |
 | `revisionHistoryLimit: 5` | 保留 5 个历史版本，够回滚且不堆积 RS |
 
 ### `setWeight` 在没配 trafficRouting 时是按副本数近似

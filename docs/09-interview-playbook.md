@@ -201,7 +201,9 @@
 > 取决于**变更的来源**，而且这两者经常纠缠在一起。
 >
 > 镜像回滚相对干净：Argo Rollouts 把 stableService 的 selector 指回旧 ReplicaSet，
-> 秒级完成，因为旧 Pod 还在（我配了 `scaleDownDelaySeconds` 不立即缩容）。
+> 秒级完成，因为金丝雀期间 stable 的副本数一直保持满编，中止只需把 selector 切回去。
+> （这里有个细节：没配 `trafficRouting` 时 Argo 不允许显式设 `scaleDownDelaySeconds`，
+> 所以面试时要讲清「快」来自副本策略，而不是来自某个延迟缩容参数。）
 >
 > 配置回滚要危险得多。如果配置在 ConfigMap 里，而 ConfigMap 是
 > stable 和 canary **共享**的——改它会把正在服务的稳定版一起打挂。
