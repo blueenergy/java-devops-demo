@@ -90,9 +90,13 @@ jobs:
           #   surefire-reports —— 单元测试
           #   failsafe-reports —— 集成测试
           # 只写 surefire 是常见的疏漏，结果是集成测试的失败在报告里完全看不到。
-          path: |
-            **/target/surefire-reports/TEST-*.xml
-            **/target/failsafe-reports/TEST-*.xml
+          #
+          # 这里用【一个】brace 展开的 glob，而不是 YAML 多行写法。
+          # 原因：v3 内部用 fast-glob 解析 path，多行字符串会被当成
+          # 一个「带换行的路径」而不是两个模式 —— 实测报错
+          # "No file matches path **/target/surefire-reports/TEST-*.xml\n**/target/failsafe-reports/TEST-*.xml"。
+          # fast-glob 支持 brace 展开，一个模式就能覆盖两个目录。
+          path: '**/target/{surefire-reports,failsafe-reports}/TEST-*.xml'
           reporter: java-junit
           fail-on-error: false
 

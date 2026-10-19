@@ -34,6 +34,8 @@
 
     <!-- 依赖版本 -->
     <spring-boot.version>3.5.16</spring-boot.version>
+    <!-- 覆盖 Boot BOM 的 42.7.11：CVE-2026-54291，见 dependencyManagement 里的说明 -->
+    <postgresql.version>42.7.14</postgresql.version>
 
     <!--
       插件版本必须在这里显式钉死。
@@ -61,6 +63,29 @@
 
   <dependencyManagement>
     <dependencies>
+      <!--
+        PostgreSQL JDBC 驱动版本覆盖。
+
+        背景：Spring Boot 3.5.16 的 BOM 管理 42.7.11，而该版本存在
+        CVE-2026-54291（HIGH）—— SCRAM-SHA-256-PLUS 降级导致中间人防护失效。
+        Trivy 在 CI 里把它拦了下来，这正是依赖扫描门禁该干的事。
+
+        覆盖方式：在同一份 dependencyManagement 里显式声明版本。
+        显式条目优先于 import 进来的 BOM，不需要改 Boot 版本。
+
+        这暴露了「BOM 统一版本」的一个真实代价：
+        版本被集中管理后，单个依赖的紧急安全更新需要显式覆盖，
+        否则要等下一个 Boot patch 版本才能修。
+        判断标准：安全修复等不起，就覆盖；功能升级可以等。
+
+        Trivy 报的修复版本是 42.7.12，这里取当前最新的 42.7.14。
+      -->
+      <dependency>
+        <groupId>org.postgresql</groupId>
+        <artifactId>postgresql</artifactId>
+        <version>${postgresql.version}</version>
+      </dependency>
+
       <!--
         用 import scope 引入 Boot 的 BOM，而不是把 spring-boot-starter-parent 当父 POM。
         原因：我们需要自定义父 POM 来做多模块聚合与统一插件治理；
