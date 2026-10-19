@@ -59,39 +59,38 @@ patches:
   # 那个节点一挂，服务就整体不可用，多副本的意义荡然无存。
   # whenUnsatisfiable: ScheduleAnyway 而不是 DoNotSchedule：
   # 硬约束在节点数不足时会让 Pod 永远 Pending，软约束只影响调度偏好。
+  # 同 ci overlay 的说明：Rollout 是 CRD，kustomize 对 containers 数组
+  # 是整体替换而非按 name 合并，必须用 JSON6902 精确定位字段。
   - target:
+      group: argoproj.io
+      version: v1alpha1
       kind: Rollout
       name: order-demo-api
     patch: |-
-      apiVersion: argoproj.io/v1alpha1
-      kind: Rollout
-      metadata:
-        name: order-demo-api
-      spec:
-        template:
-          spec:
-            topologySpreadConstraints:
-              - maxSkew: 1
-                topologyKey: topology.kubernetes.io/zone
-                whenUnsatisfiable: ScheduleAnyway
-                labelSelector:
-                  matchLabels:
-                    app.kubernetes.io/name: order-demo-api
-              - maxSkew: 1
-                topologyKey: kubernetes.io/hostname
-                whenUnsatisfiable: ScheduleAnyway
-                labelSelector:
-                  matchLabels:
-                    app.kubernetes.io/name: order-demo-api
-            containers:
-              - name: order-demo-api
-                resources:
-                  requests:
-                    cpu: 500m
-                    memory: 768Mi
-                  limits:
-                    cpu: "2"
-                    memory: 1Gi
+      - op: add
+        path: /spec/template/spec/topologySpreadConstraints
+        value:
+          - maxSkew: 1
+            topologyKey: topology.kubernetes.io/zone
+            whenUnsatisfiable: ScheduleAnyway
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: order-demo-api
+          - maxSkew: 1
+            topologyKey: kubernetes.io/hostname
+            whenUnsatisfiable: ScheduleAnyway
+            labelSelector:
+              matchLabels:
+                app.kubernetes.io/name: order-demo-api
+      - op: replace
+        path: /spec/template/spec/containers/0/resources
+        value:
+          requests:
+            cpu: 500m
+            memory: 768Mi
+          limits:
+            cpu: "2"
+            memory: 1Gi
 
 configMapGenerator:
   - name: order-demo-api-config

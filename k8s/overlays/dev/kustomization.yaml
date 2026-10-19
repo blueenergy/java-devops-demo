@@ -65,30 +65,31 @@ patches:
       metadata:
         name: order-demo-api
 
-  # dev 打开 DEBUG 日志，并放宽资源限制（本地 kind 集群资源有限）
+  # dev 打开 DEBUG 日志，并放宽资源限制。
+  #
+  # 用 JSON6902 而不是 strategic merge：Rollout 是 CRD，kustomize 对它的
+  # containers 数组是整体替换而非按 name 合并，会把 image/探针一并抹掉。
+  # 详见 overlays/ci 里同一位置的说明。
   - target:
+      group: argoproj.io
+      version: v1alpha1
       kind: Rollout
       name: order-demo-api
     patch: |-
-      apiVersion: argoproj.io/v1alpha1
-      kind: Rollout
-      metadata:
-        name: order-demo-api
-      spec:
-        template:
-          spec:
-            containers:
-              - name: order-demo-api
-                env:
-                  - name: LOG_LEVEL
-                    value: DEBUG
-                resources:
-                  requests:
-                    cpu: 100m
-                    memory: 384Mi
-                  limits:
-                    cpu: 500m
-                    memory: 512Mi
+      - op: add
+        path: /spec/template/spec/containers/0/env
+        value:
+          - name: LOG_LEVEL
+            value: DEBUG
+      - op: replace
+        path: /spec/template/spec/containers/0/resources
+        value:
+          requests:
+            cpu: 100m
+            memory: 384Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
 
 # dev 的金丝雀步进更激进：30 秒就能走完，加快本地迭代
 configMapGenerator:

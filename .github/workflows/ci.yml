@@ -211,6 +211,13 @@ jobs:
               -schema-location 'https://fastly.jsdelivr.net/gh/yannh/kubernetes-json-schema@master/{{.NormalizedKubernetesVersion}}-standalone{{.StrictSuffix}}/{{.ResourceKind}}{{.KindSuffix}}.json' \
               -schema-location default \
               /m.yaml
+
+            # kubeconform 用 -ignore-missing-schemas 时会【完全跳过】CRD
+            # （Rollout / AnalysisTemplate），所以它们实际上没被校验。
+            # 这一步补上关键字段断言：image 非空、三类探针、resources、securityContext。
+            # 真实踩过的坑：kustomize 对 CRD 的 containers 数组是整体替换，
+            # 渲染"成功"、schema "通过"，但 image 已被抹掉，apply 时才报 Required value。
+            python3 scripts/check-rendered-manifests.py "/tmp/render-${overlay}.yaml"
             echo "::endgroup::"
           done
 

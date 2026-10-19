@@ -165,6 +165,8 @@ java-demo-parent
 
 **Kustomize 的 `replicas:` 不认 CRD。** 它只匹配 Deployment/StatefulSet/ReplicaSet，而工作负载是 Argo Rollouts 的 `Rollout`。三个 overlay 全部渲染失败，而单个 YAML 的 schema 校验全绿——这类错误只有真正 `kustomize build` 才会暴露，所以 CI 里加了「渲染 overlay 后再校验」一步。
 
+**patch CRD 的 `containers` 会整体替换，不是按 name 合并。** 对 CRD 而言 kustomize 没有 OpenAPI 元数据，退化成 JSON merge，数组整体替换——补丁里只写 `containers: [{name, resources}]`，`image`、探针、`securityContext` 全部消失。渲染成功、schema 也过（kubeconform 对 CRD 直接跳过），直到 apply 才报 `containers[0].image: Required value`。改用 JSON6902 精确改字段，并加了渲染后关键字段断言。
+
 **AnalysisTemplate 没被 base 引用。** Rollout 能创建、Pod 能跑，走到金丝雀分析那一步才报 `analysistemplate not found`。现在移进 `k8s/base/` 并加入 resources。
 
 **`dorny/test-reporter` v3 的 `path` 用逗号分隔，不是换行。** v2 是换行，v3 源码里是 `this.path.split(',')`。照搬老配置会静默失效，只报 `No file matches path`——而文件明明就在那里。`{a,b}` 花括号写法也会被逗号切开，同样失效。

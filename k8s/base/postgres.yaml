@@ -94,6 +94,16 @@ spec:
               mountPath: /var/lib/postgresql/data
             - name: run
               mountPath: /var/run/postgresql
+          # 首次启动要跑 initdb，可能比 liveness 的容忍窗口更久。
+          # 没有 startupProbe 时，liveness 会在初始化期间就开始计数并杀掉容器，
+          # 新库反而永远起不来（重启后又要重新 initdb，形成循环）。
+          startupProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U $POSTGRES_USER -d $POSTGRES_DB"]
+            periodSeconds: 5
+            failureThreshold: 30      # 最多容忍 150 秒初始化
+            timeoutSeconds: 3
+
           readinessProbe:
             exec:
               command: ["sh", "-c", "pg_isready -U $POSTGRES_USER -d $POSTGRES_DB"]

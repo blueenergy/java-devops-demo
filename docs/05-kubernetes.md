@@ -212,7 +212,59 @@ PDB 只约束「主动驱逐」这类 API 调用。所以它是**锦上添花而
 
 `overlays/dev` 与 `overlays/ci` 都用 `$patch: delete` 把 PDB 删掉了，原因写在注释里：单副本下 `minAvailable: 2` 永远无法满足，会让任何节点排水操作被**无限阻塞**。这是「直接把生产配置搬到 dev」的典型翻车点。
 
-## Kustomize 与 CRD 的两个坑（都真实踩过）
+## Kustomize 与 CRD 的三个坑（都真实踩过）
+
+### 坑三：patch CRD 的容器数组会整体替换，不是按 name 合并
+
+这是三个坑里最危险的一个，因为它**渲染成功、schema 校验也通过**。
+
+```yaml
+# 看起来无害：只想改 resources
+patches:
+  - target: {group: argoproj.io, version: v1alpha1, kind: Rollout, name: order-demo-api}
+    patch: |-
+      apiVersion: argoproj.io/v1alpha1
+      kind: Rollout
+      metadata: {name: order-demo-api}
+      spec:
+        template:
+          spec:
+            containers:
+              - name: order-demo-api
+                resources: {requests: {cpu: 100m, memory: 384Mi}}
+```
+
+对内置类型（Deployment 等），kustomize 有 OpenAPI 字段元数据，会做**战略合并**，
+按 `name` 把字段合进已有容器。但 Rollout 是 CRD —— 没有元数据，
+kustomize 退化成 **JSON merge**，而 JSON merge 对数组是**整体替换**。
+
+结果：`image`、`ports`、三类探针、`securityContext`、`envFrom` 全部消失。
+`kubectl apply` 时才报：
+
+```
+InvalidSpec: The Rollout "order-demo-api" is invalid:
+spec.template.spec.containers[0].image: Required value
+```
+
+**为什么校验没拦住**：CI 里 kubeconform 必须加 `-ignore-missing-schemas`
+（CRD 没有内置 schema），而加了之后 CRD 会被**直接跳过**，
+等于 Rollout 从未被验证过。
+
+**正确写法是 JSON6902，精确定位到字段**：
+
+```yaml
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/resources
+        value: {requests: {cpu: 100m, memory: 384Mi}, limits: {cpu: 500m, memory: 640Mi}}
+      - op: add
+        path: /spec/template/spec/containers/0/env
+        value: [{name: LOG_LEVEL, value: DEBUG}]
+```
+
+**并补一道断言**：`scripts/check-rendered-manifests.py` 对渲染后的产物检查
+`image` 非空、三类探针齐全、`resources` 与 `securityContext` 存在。
+CI 的渲染校验步骤会调用它。这是唯一能在 apply 之前发现这类问题的手段。
 
 **`replicas:` 字段不认 CRD。** kustomization 里的
 

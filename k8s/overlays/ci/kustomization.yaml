@@ -97,24 +97,29 @@ patches:
       metadata:
         name: order-demo-api
 
-  # kind 集群资源有限，调小配额避免调度失败
+  # kind 集群资源有限，调小配额避免调度失败。
+  #
+  # 必须用 JSON6902（op/path）而不是 strategic merge 风格的补丁。
+  # 原因：Rollout 是 CRD，kustomize 没有它的 OpenAPI 字段元数据，
+  # 于是把补丁当作 JSON merge 处理 —— **数组是整体替换，不是按 name 合并**。
+  # 写成 containers: [{name: ..., resources: ...}] 会把整个容器列表替换掉，
+  # image、ports、三类探针、securityContext 全部丢失。
+  # 症状是 Rollout 报 InvalidSpec: containers[0].image: Required value。
+  #
+  # 这类错误静态 YAML 校验看不出来（kubeconform 对 CRD 直接跳过），
+  # 只有渲染后检查字段、或真正 apply 到集群才会暴露。
   - target:
+      group: argoproj.io
+      version: v1alpha1
       kind: Rollout
       name: order-demo-api
     patch: |-
-      apiVersion: argoproj.io/v1alpha1
-      kind: Rollout
-      metadata:
-        name: order-demo-api
-      spec:
-        template:
-          spec:
-            containers:
-              - name: order-demo-api
-                resources:
-                  requests:
-                    cpu: 100m
-                    memory: 384Mi
-                  limits:
-                    cpu: 500m
-                    memory: 640Mi
+      - op: replace
+        path: /spec/template/spec/containers/0/resources
+        value:
+          requests:
+            cpu: 100m
+            memory: 384Mi
+          limits:
+            cpu: 500m
+            memory: 640Mi
