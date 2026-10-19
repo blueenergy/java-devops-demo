@@ -137,6 +137,7 @@ java-demo-parent
 | [07-observability](docs/07-observability.md) | 指标、日志、告警规则设计 |
 | [08-banking-devops](docs/08-banking-devops.md) | **银行/金融场景的额外考量** |
 | [09-interview-playbook](docs/09-interview-playbook.md) | **面试故事线、高频问答、反问清单** |
+| [runbook](docs/runbook.md) | 告警触发后的处置手册（每条告警对应一个行动） |
 
 ---
 
