@@ -12,17 +12,10 @@
 # 一条命令跑起来，不依赖任何 Operator。
 # 面试时这里要能说清「为什么 demo 这么做」以及「生产会怎么做」。
 # ------------------------------------------------------------------
-apiVersion: v1
-kind: Secret
-metadata:
-  name: order-demo-postgres-secret
-  labels:
-    app.kubernetes.io/name: order-demo-postgres
-type: Opaque
-stringData:
-  POSTGRES_DB: orders
-  POSTGRES_USER: orders
-  POSTGRES_PASSWORD: CHANGE_ME_demo_only
+# 凭据不再单独定义 —— 数据库通过 secretKeyRef 引用应用那份
+# order-demo-db-credentials（见 secret.yaml）。
+# 曾经两边各写一份字面量，结果密码不一致，应用连不上库且只在运行期暴露。
+# 单一来源让这类错误在物理上不可能发生。
 
 ---
 apiVersion: v1
@@ -76,13 +69,24 @@ spec:
           ports:
             - name: postgres
               containerPort: 5432
-          envFrom:
-            - secretRef:
-                name: order-demo-postgres-secret
-          # PGDATA 指到子目录是官方镜像的要求：
-          # 直接挂载到 /var/lib/postgresql/data 时，挂载点下的 lost+found
-          # 会让 initdb 认为目录非空而拒绝初始化。
+          # 与数据库同名的变量通过 secretKeyRef 从共享凭据映射过来，
+          # 保证应用侧与数据库侧用的永远是同一份密码。
           env:
+            - name: POSTGRES_DB
+              value: orders
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: order-demo-db-credentials
+                  key: DB_USERNAME
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: order-demo-db-credentials
+                  key: DB_PASSWORD
+            # PGDATA 指到子目录是官方镜像的要求：
+            # 直接挂载到 /var/lib/postgresql/data 时，挂载点下的 lost+found
+            # 会让 initdb 认为目录非空而拒绝初始化。
             - name: PGDATA
               value: /var/lib/postgresql/data/pgdata
           volumeMounts:

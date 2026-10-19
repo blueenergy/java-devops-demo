@@ -108,7 +108,7 @@ spec:
             - configMapRef:
                 name: order-demo-api-config
             - secretRef:
-                name: order-demo-api-secret
+                name: order-demo-db-credentials
 
           # ------------------------------------------------------------------
           # 三类探针各司其职，配错会引发连锁故障：

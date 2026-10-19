@@ -121,6 +121,26 @@ def main() -> int:
                             f" 引用不存在的 Secret: {ref_name}"
                         )
 
+            # 逐个 env 的 valueFrom 引用（secretKeyRef / configMapKeyRef）。
+            # 这两种引用比 envFrom 更隐蔽：envFrom 引用整个 Secret，
+            # 而这里引用的是一个具体的 key —— key 写错时 Pod 同样会
+            # CreateContainerConfigError，但报错只提到 key 名。
+            for env_var in container.get("env") or []:
+                value_from = env_var.get("valueFrom") or {}
+                for ref_kind, known in (
+                    ("secretKeyRef", secrets),
+                    ("configMapKeyRef", config_maps),
+                ):
+                    ref = value_from.get(ref_kind)
+                    if not ref:
+                        continue
+                    ref_name = ref.get("name")
+                    if ref_name not in known:
+                        errors.append(
+                            f"{kind(workload)}/{name(workload)} 的容器 {container.get('name')}"
+                            f" 的 env {env_var.get('name')} 引用了不存在的 {ref_kind}: {ref_name}"
+                        )
+
             # volume 挂载引用的 ConfigMap / Secret
             for vol in workload.get("spec", {}).get("template", {}).get("spec", {}).get("volumes") or []:
                 if "configMap" in vol and vol["configMap"].get("name") not in config_maps:
