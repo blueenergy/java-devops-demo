@@ -201,7 +201,9 @@ jobs:
       - name: 渲染 overlay 并校验最终产物
         run: |
           set -euo pipefail
-          for overlay in dev prod ci; do
+          # ci-fault 是 CD 场景 B 用的故障注入 overlay，同样要校验：
+          # 它改的是 Rollout 的容器 env，最容易踩到「数组整体替换」那个坑。
+          for overlay in dev prod ci ci-fault; do
             echo "::group::overlays/$overlay"
             kubectl kustomize "k8s/overlays/$overlay" > "/tmp/render-${overlay}.yaml"
             docker run --rm -v "/tmp/render-${overlay}.yaml:/m.yaml:ro" \

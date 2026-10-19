@@ -152,18 +152,28 @@ setWeight: 50  →  实际是 2 对 1 ≈ 67%（还受 maxSurge/maxUnavailable �
 ### 触发方式
 
 ```bash
-# 改 Pod 模板才能触发新 revision
-kubectl -n order-demo set env rollout/order-demo-api \
-  DEPLOY_REVISION="a-$(date +%s)" \
-  FAULT_ENABLED="false" \
-  FAULT_ERROR_RATE="0.0"
+# 用 Argo 插件自带的 restart 触发新 revision
+kubectl argo rollouts restart order-demo-api -n order-demo
 ```
+
+**为什么不是 `kubectl set env`**：
+
+```bash
+kubectl -n order-demo set env rollout/order-demo-api DEPLOY_REVISION=...
+# error: no kind "Rollout" is registered for version "argoproj.io/v1alpha1"
+#        in scheme "pkg/scheme/scheme.go:28"
+```
+
+`set env` 需要把对象解码成强类型 struct，而 CRD 不在 kubectl 的客户端 scheme 里。
+`kubectl argo rollouts restart` 由插件实现，行为等价于 `kubectl rollout restart`
+（给 pod template 打 `restartedAt` 注解），但认识 Rollout。
 
 **这里有个高频误区**：只改 ConfigMap 是**不会**触发 Rollout 的。
 Argo Rollouts 与原生 Deployment 一样，只监听 **pod template** 的变化。
 改完 ConfigMap 发现没有任何反应，会以为 Rollout 坏了，实际是它根本没理由重启 Pod。
 
-真实场景中触发新 revision 的是**新镜像 tag**，这里用环境变量模拟。
+真实场景中触发新 revision 的是**新镜像 tag**，这里用 restart 模拟。
+注意 restart 只改注解、不改镜像，所以演示的重点是**流程**而不是版本差异。
 
 ### 观察到的过程
 
@@ -207,19 +217,41 @@ echo -n ok
 ### 故障怎么注入
 
 ```bash
-kubectl -n order-demo set env rollout/order-demo-api \
-  DEPLOY_REVISION="b-$(date +%s)" \
-  FAULT_ENABLED="true" \
-  FAULT_ERROR_RATE="0.5"
+kubectl apply -k k8s/overlays/ci-fault
 ```
+
+`k8s/overlays/ci-fault` 在 `ci` 的基础上，用 JSON6902 给 pod template 的容器
+加上 `FAULT_ENABLED=true` / `FAULT_ERROR_RATE=0.5`：
+
+```yaml
+patches:
+  - target: {group: argoproj.io, version: v1alpha1, kind: Rollout, name: order-demo-api}
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/env
+        value:
+          - {name: FAULT_ENABLED, value: "true"}
+          - {name: FAULT_ERROR_RATE, value: "0.5"}
+```
+
+### 为什么不用 `kubectl set env` 或 merge patch
+
+| 方式 | 结果 |
+|---|---|
+| `kubectl set env rollout/...` | `no kind "Rollout" is registered ... in scheme` —— CRD 不在客户端 scheme 里 |
+| `kubectl patch --type=merge` | 能执行，但 merge 对数组是整体替换，`containers` 被补丁里的小数组覆盖，image/探针全丢 |
+| `kubectl apply -k <overlay>` | **正确**。apply 走 unstructured 路径，对 CRD 完全支持，且变更可进 Git、可复现 |
 
 ### 两个关键设计
 
-**第一，故障走 Pod 模板的环境变量，不走 ConfigMap。**
+**第一，故障写进 pod template，而不是只改 ConfigMap。**
 
-ConfigMap 是 stable 与 canary **共享**的。改它会把正在服务的稳定版一起打挂——
-那演示的就不是「金丝雀拦住了坏版本」，而是「我手动把服务搞挂了」。
-放进 pod template 后，故障只存在于新 ReplicaSet 的 Pod 里，stable 版本不受影响。
+只改 ConfigMap 有两个问题：它**不会触发新 revision**（Rollout 只监听 pod template），
+而且共享的配置会让后续任何重建的 Pod 都带上故障。
+
+写进 pod template 后，故障只存在于新 ReplicaSet 的 Pod 里，
+正在服务的 stable Pod（在变更前创建，`envFrom` 的值已固化进容器环境）不受影响 ——
+这才是真实的金丝雀语义：**坏版本被拦在放量阶段，而不是把线上一起拖下水**。
 
 **第二，故障注入刻意绕开 `/actuator/**`。**
 
@@ -490,6 +522,8 @@ Flagger 把「分析 + 放量 + 回滚」做成闭环控制器，
 | Rollout 卡在 `Progressing` 不推进 | AnalysisRun 判 Inconclusive 在重试 | `kubectl get analysisrun -o yaml` 看 metric 的 `phase` |
 | AnalysisRun 一直 `Running` | 探测任务连不上 Service | 检查 NetworkPolicy 是否放行了分析 Pod |
 | Pod 一直 `NotReady` | readiness 探针失败 | `kubectl describe pod` 看事件，确认 `/actuator/health/readiness` 返回 |
-| 回滚后仍有错误 | 故障在 ConfigMap 里（stable 与 canary 共享） | 检查故障注入的位置 |
+| 回滚后仍有错误 | 故障写在共享 ConfigMap 里，回滚后新建的 Pod 仍会带上 | 把故障写进 pod template（见 `overlays/ci-fault`） |
+| `kubectl set env` 报 `no kind "Rollout" is registered` | CRD 不在客户端 scheme，改用 `kubectl argo rollouts restart` 或 `apply -k` |
+| Rollout 报 `scaleDownDelaySeconds can only be used with traffic routing` | 未配 trafficRouting 时不能显式设该字段，删掉即可（默认行为不变） |
 | `AnalysisRun` 创建失败 | AnalysisTemplate 不存在或名字拼错 | `kubectl get analysistemplate` |
 | Rollout 显示 Healthy 但流量为 0 | Service selector 与 Pod 标签不匹配 | `kubectl get endpoints <svc>` 看是否为空 |

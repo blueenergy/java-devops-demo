@@ -1,0 +1,55 @@
+# CI 故障注入 overlay：在金丝雀演示的场景 B 中使用。
+#
+# 作用：把故障开关写进 Pod 模板的环境变量，从而
+#   1) 触发一个新的 revision（pod template 变了）
+#   2) 让新版本的 Pod 带上 50% 错误率
+#
+# ------------------------------------------------------------------
+# 为什么不用 kubectl set env：
+#
+#   kubectl set env rollout/order-demo-api FAULT_ENABLED=true
+#
+# 会直接失败：
+#   error: no kind "Rollout" is registered for version "argoproj.io/v1alpha1"
+#   in scheme "pkg/scheme/scheme.go:28"
+#
+# 因为 kubectl set env 需要把对象解码成强类型的 Go struct，
+# 而 CRD 不在 kubectl 的客户端 scheme 里。
+#
+# 为什么也不用 kubectl patch --type=merge：
+#   merge patch 对数组是整体替换，containers 会被补丁里的小数组覆盖，
+#   image / 探针 / securityContext 又会被抹掉 —— 和 kustomize 那个坑同源。
+#
+# 所以改用「声明式 overlay + kubectl apply -k」：
+#   apply 走的是 unstructured 路径，对 CRD 完全支持，且结果可复现、可进 Git。
+# ------------------------------------------------------------------
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: order-demo
+
+resources:
+  - ../ci
+
+patches:
+  # 用 JSON6902 只改容器 0 的 env 字段，不碰其它任何字段。
+  - target:
+      group: argoproj.io
+      version: v1alpha1
+      kind: Rollout
+      name: order-demo-api
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/env
+        value:
+          - name: FAULT_ENABLED
+            value: "true"
+          - name: FAULT_ERROR_RATE
+            value: "0.5"
+          - name: FAULT_LATENCY_MS
+            value: "0"
+
+# 注意：FaultInjectionFilter 刻意只对 /api/** 生效，
+# 所以新 Pod 的就绪探针（/actuator/health/readiness）仍然正常，
+# Pod 会正常加入 canary Service —— 这才是「金丝雀分析发现业务错误」，
+# 而不是「新版本启动失败」。两者是完全不同的故障模式。
