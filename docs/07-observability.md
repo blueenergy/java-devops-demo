@@ -300,7 +300,7 @@ logging:
 ```bash
 curl -s localhost:8080/actuator/prometheus | grep -E 'order_|fault_'   # 自定义指标
 curl -s localhost:8080/actuator/health | jq .                          # 各组件状态
-open http://localhost:9090/targets                                     # 抓取目标是否 UP
+open http://localhost:9091/targets                                     # 抓取目标是否 UP
 open http://localhost:9091/rules                                       # 7 条规则是否加载
 open http://localhost:9091/alerts                                      # 哪些规则正在触发
 ```

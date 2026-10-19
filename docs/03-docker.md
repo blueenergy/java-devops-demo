@@ -186,9 +186,28 @@ shell 形式的实际后果链条：k8s 删除 Pod 时向 PID 1 发 SIGTERM → 
 COPY --from=builder --chown=app:app /build/demo-api/target/demo-api-*-exec.jar /app/app.jar
 ```
 
-**现状核对（重要）**：当前 `demo-api/pom.xml` 只在 `<build><plugins>` 里声明了 `spring-boot-maven-plugin` 并设置了 `classifier`，**没有绑定 `repackage` 执行**。自定义父 POM 不像 `spring-boot-starter-parent` 那样在 `pluginManagement` 里预置 `repackage`，而 Maven 只执行「被生命周期绑定过的 goal」—— 声明插件本身不会执行任何 goal。实际核对：`demo-api/target/` 下只有 `demo-api-1.0.0-SNAPSHOT.jar`，没有 `-exec.jar`；本地仓库里也没有下载过 `spring-boot-maven-plugin`（插件从未被解析）。此时 `docker build` 会停在上面那行 COPY，报找不到匹配文件。
+### 构建这个仓库时踩到的坑（值得完整读一遍）
 
-修法是补一个显式执行，不需要改 Dockerfile：
+最初 `demo-api/pom.xml` 只在 `<build><plugins>` 里声明了 `spring-boot-maven-plugin`
+并设置了 `classifier`，**没有绑定 `repackage` 执行**。直觉上「声明插件就会在 package
+阶段跑 repackage」——这对继承 `spring-boot-starter-parent` 的项目成立，
+但那份绑定并不在插件自身，而是 **starter-parent 的 `pluginManagement` 里预置的 execution**。
+本项目选择自定义父 POM，绑定就跟着消失了。
+
+失败链条非常隐蔽：
+
+```
+mvn verify 全绿（只跑了 jar:jar，没有 repackage 这一行）
+    ↓  target/ 里只有瘦 jar，没有 -exec.jar
+docker build 成功（COPY 的通配符没匹配到文件，BuildKit 未报错）
+    ↓  镜像里 /app 是空的
+docker run → "Error: Unable to access jarfile /app/app.jar"
+```
+
+**构建、测试、推送每一步都绿，死在运行期。** 这类故障最难排查，
+因为所有自动化检查都给了「通过」的信号。
+
+修法是补一个显式 execution（不需要改 Dockerfile）：
 
 ```xml
 <executions>
@@ -198,6 +217,10 @@ COPY --from=builder --chown=app:app /build/demo-api/target/demo-api-*-exec.jar /
   </execution>
 </executions>
 ```
+
+**通用教训**：自定义父 POM 时，`spring-boot-starter-parent` 提供的三样东西会一起消失
+——插件版本、插件 execution 绑定、资源过滤 delimiter。
+「BOM 不管插件」只是其中一条，另外两条更容易被忽略，因为它们不报错。
 
 ## 替代方案：CI 先 `mvn package`，Dockerfile 只做组装
 

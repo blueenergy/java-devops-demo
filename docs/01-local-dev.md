@@ -184,7 +184,7 @@ Docker 那一路是唯一无法自动对齐的：镜像 tag 里的 `3.9.16` 是�
 |---|---|---|---|
 | 依赖版本仲裁 | BOM 继承 | `spring-boot-dependencies` + `import` scope | 每个依赖都要手写版本 |
 | **插件版本** | 由 parent 的 `pluginManagement` 管 | **必须逐个显式钉死** | 见下 |
-| 资源过滤定界符 | `<delimiter>@</delimiter>` | 自己配 `maven-resources-plugin` | `application.yml` 里的 `@project.version@` 不被替换，**构建静默通过，运行期才炸** |
+| 资源过滤定界符 | `resource.delimiter=@` | 自己配 `maven-resources-plugin` 的 `<delimiters>` 集合并关掉默认值 | `application.yml` 里的 `@project.version@` 不被替换，**构建静默通过，运行期才炸**；且默认定界符 `${*}` 会试图替换 Spring 自己的占位符 |
 | 编译级别默认值 | `maven.compiler.release` | 自己设 `java.version` / `maven.compiler.release` | 编译目标与运行时不一致 |
 
 关于资源过滤，还有一层必须知道：用 `@` 作定界符是为了**不干扰 Spring 自己的 `${SERVER_PORT:8080}` 占位符**。如果用默认的 `${}`，Spring 的占位符会在构建期被 Maven 尝试替换，而那个属性根本不存在，替换结果不可预期。
@@ -200,7 +200,7 @@ Docker 那一路是唯一无法自动对齐的：镜像 tag 里的 `3.9.16` 是�
 | `maven-compiler-plugin` | 3.16.0 | `<release>` 与 `<parameters>true</parameters>` 的行为随版本变 |
 | `maven-surefire-plugin` | 3.6.0 | 与 Failsafe 版本必须一致，否则报告格式对不上 |
 | `maven-failsafe-plugin` | 3.6.0 | 同上 |
-| `maven-resources-plugin` | 3.5.0 | `<delimiter>` 的解析行为 |
+| `maven-resources-plugin` | 3.5.0 | **3.5.0 把 `delimiter`（单数）改成了 `delimiters`（`LinkedHashSet`）**。写旧参数名不会报错，只有一条很容易被忽略的 `Parameter 'delimiter' is unknown` WARNING —— 配置悄悄失效而不自知 |
 | `maven-enforcer-plugin` | 3.6.3 | 规则集随版本增减 |
 | `jacoco-maven-plugin` | 0.8.15 | 报告 XML 结构（`<group>` 节点）会随版本变，门禁脚本依赖它 |
 | `git-commit-id-maven-plugin` | 10.0.1 | 7.x → 10.x 是 groupId 变更（`pl.project13.maven` → `io.github.git-commit-id`） |
