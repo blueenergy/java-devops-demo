@@ -196,30 +196,25 @@ Argo Rollouts 与原生 Deployment 一样，只监听 **pod template** 的变化
 
 ### 观察到的过程
 
-**真实输出**（2026-10-19，GitHub Actions CD run 39195949686）：
+**真实输出**（2026-10-19，CD run 39231690824，原样摘录）：
 
 ```
-[1] canaryWeight=% phase=Progressing
-[2] canaryWeight=% phase=Progressing
-...
-[9] canaryWeight=% phase=Progressing
-[10] canaryWeight=% phase=Healthy
+[1]..[7]   step=0  updated=1  ready=1  phase=Progressing   setWeight 20，新 Pod 就绪
+[8]..[13]  step=1  updated=1  ready=2  phase=Paused        pause 30s
+[14]..[20] step=2  updated=1  ready=2  phase=Progressing   AnalysisRun 探测
+[21]..[24] step=4  updated=1  ready=2  phase=Paused        setWeight 50 + pause
 ✓ 金丝雀发布完成，已全量切换到新版本
 ```
 
-**注意 `canaryWeight=` 后面是空的** —— 这不是 bug，而是本文第三节那个局限的
-直接体现：`.status.canary.weights` 只有在配置了 `trafficRouting` 时才会被填充，
-副本比例模式下它是空的。
+注意 `ready=1 → 2`：stable 副本一直保持满编，canary 是**额外**起的 Pod。
+这正是「回滚只需切 selector」的原因。
 
-所以脚本后来改成打印 **步骤序号与副本数**，它们在两种模式下都有意义：
-
-```
-[i] step=${STEP} updated=${UPDATED} ready=${READY} phase=${PHASE}
-```
-
-**这个细节本身就值得记住**：监控面板上的某个指标一直为空时，
-先确认这个指标在当前配置下是否本来就该有值，
-而不是急着去查「为什么采集不到」。
+> **注意不要打印 `.status.canary.weights`**：那是 `trafficRouting` 才填充的字段，
+> 没有流量路由器时它永远是空的（打印出来只有 `%`）。改用
+> step / updated / ready 三个在副本比例模式下也有意义的字段。
+>
+> 这个细节值得记住：**监控面板上某个指标一直为空时，先确认它在当前配置下
+> 是否本来就该有值**，而不是急着查「为什么采集不到」。
 
 ### 判定逻辑
 
@@ -314,15 +309,18 @@ Kubernetes 根本不会把流量切给它——金丝雀分析还没开始跑，
 
 ### 观察到的过程
 
-**真实输出**（同一次 CD run）：
+**真实输出**（同一次 CD run，原样摘录）：
 
 ```
-[1]..[8]   rollout=Progressing analysisRun=-        新 ReplicaSet 创建、等待就绪
-[9]..[13]  rollout=Paused      analysisRun=-        pause 30s（放量前的观察期）
-[14]..[17] rollout=Progressing analysisRun=Running  分析任务启动，探测业务接口
-[18]       rollout=Degraded    analysisRun=Failed   连续失败达到 failureLimit，自动中止
+[1]..[8]   rollout=Progressing analysisRun=Successful   ← 上一次（场景 A）的分析结果仍在
+[9]..[14]  rollout=Paused      analysisRun=Successful   ← pause 30s
+[15]..[18] rollout=Progressing analysisRun=Running      ← 新版本的探测任务启动
+[19]       rollout=Degraded    analysisRun=Failed       ← 连续失败达到 failureLimit，自动中止
 ✓ 金丝雀分析判定失败，Rollout 已中止
 ```
+
+`analysisRun=Successful` 是**上一次发布的**分析记录 —— 每个 revision 有独立的
+AnalysisRun，所以观察时要取「最新的那一条」，不能简单假设只有一个。
 
 整个过程约 **90 秒**，其中人工介入 **0 秒**。
 
