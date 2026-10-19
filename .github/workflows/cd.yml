@@ -72,7 +72,20 @@ jobs:
           # 正确做法是下载官方 install.yaml 用 kubectl 应用。
           # ------------------------------------------------------------------
           kubectl create namespace argo-rollouts --dry-run=client -o yaml | kubectl apply -f -
-          kubectl apply -n argo-rollouts \
+
+          # ------------------------------------------------------------------
+          # 必须用 --server-side（服务端 apply）。
+          #
+          # Rollout 的 CRD 非常大。客户端 apply 会把整个清单塞进
+          # kubectl.kubernetes.io/last-applied-configuration 注解，
+          # 而注解有 262144 字节上限，于是直接失败：
+          #   CustomResourceDefinition "rollouts.argoproj.io" is invalid:
+          #   metadata.annotations: Too long: may not be more than 262144 bytes
+          #
+          # 服务端 apply 由 API Server 管理字段归属，不写这个注解，
+          # 因此不受限制。这是安装大型 CRD 的标准做法。
+          # ------------------------------------------------------------------
+          kubectl apply --server-side --force-conflicts -n argo-rollouts \
             -f "https://github.com/argoproj/argo-rollouts/releases/download/${ARGO_ROLLOUTS_VERSION}/install.yaml"
           kubectl -n argo-rollouts rollout status deployment/argo-rollouts --timeout=180s
 

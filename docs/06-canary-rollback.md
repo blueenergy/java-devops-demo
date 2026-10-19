@@ -60,6 +60,35 @@ Argo 通过修改**两个 Service 的 selector** 来导流，而不是去改 Pod
 
 ---
 
+## 二点五、安装 Argo Rollouts 的两个坑
+
+**坑一：它不是 GitHub Action。** 写成 `uses: argoproj/argo-rollouts@v1.10.1` 会在
+流水线启动时直接报 `Can't find 'action.yml'`，且错误信息不会提示你「这不是一个 Action」。
+正确做法是下载官方 `install.yaml` 用 `kubectl` 应用。
+
+**坑二：`kubectl apply` 装不上它的 CRD。**
+
+```
+CustomResourceDefinition.apiextensions.k8s.io "rollouts.argoproj.io" is invalid:
+metadata.annotations: Too long: may not be more than 262144 bytes
+```
+
+客户端 apply 会把整个清单写进 `kubectl.kubernetes.io/last-applied-configuration`
+注解，而注解上限是 256 KB。Rollout 的 CRD 超过这个大小。
+
+修法是服务端 apply：
+
+```bash
+kubectl apply --server-side --force-conflicts -n argo-rollouts \
+  -f ".../install.yaml"
+```
+
+服务端 apply 由 API Server 管理字段归属，不写 last-applied 注解。
+**这是安装大型 CRD 的通用做法**，不限于 Argo Rollouts。
+
+另外别忘了单独安装 `kubectl-argo-rollouts` 插件 —— CRD 只让集群认识资源，
+`kubectl argo rollouts ...` 这条子命令来自独立的插件，不装会报 `unknown command`。
+
 ## 三、一个必须说清楚的局限：权重是近似的
 
 **本配置没有配 `trafficRouting`。** 这意味着 `setWeight: 20` 无法真正按百分比切分流量，
