@@ -236,8 +236,11 @@ jobs:
           for i in $(seq 1 36); do
             PHASE=$(kubectl -n "${NAMESPACE}" get rollout order-demo-api \
               -o jsonpath='{.status.phase}' 2>/dev/null || echo "-")
-            AR_PHASE=$(kubectl -n "${NAMESPACE}" get analysisrun \
-              -o jsonpath='{.items[-1:].status.phase}' 2>/dev/null || echo "-")
+            # 用 jq 取「最近一条」AnalysisRun，而不是 jsonpath 的 .items[-1:]。
+            # kubectl 的 jsonpath 对负索引/切片的支持并不可靠，
+            # 不同版本下可能报错或返回空 —— 这类问题只在集群里才暴露。
+            AR_PHASE=$(kubectl -n "${NAMESPACE}" get analysisrun -o json 2>/dev/null \
+              | jq -r '.items | sort_by(.metadata.creationTimestamp) | if length > 0 then last.status.phase // "-" else "-" end')
             echo "[$i] rollout=${PHASE} analysisRun=${AR_PHASE}"
             if [ "${PHASE}" = "Degraded" ] || [ "${AR_PHASE}" = "Failed" ]; then
               echo "✓ 金丝雀分析判定失败，Rollout 已中止"
@@ -261,8 +264,13 @@ jobs:
           # 验证稳定版本仍然可用 —— 这是回滚是否真正生效的最终判据。
           # 只看 Rollout 状态是不够的：状态为 Degraded 不代表服务已恢复，
           # 要实际打一次接口确认。
+          #
+          # --field-selector=status.phase=Running 是必要的：回滚瞬间可能还有
+          # 正在终止的 canary Pod，直接取 items[0] 有可能 exec 到一个已死的 Pod 上，
+          # 得到 "container not running" 这种与回滚无关的假失败。
           STABLE_POD=$(kubectl -n "${NAMESPACE}" get pods \
             -l app.kubernetes.io/name=order-demo-api \
+            --field-selector=status.phase=Running \
             -o jsonpath='{.items[0].metadata.name}')
           kubectl -n "${NAMESPACE}" exec "${STABLE_POD}" -- \
             wget -qO- http://localhost:8080/actuator/health/readiness
@@ -285,9 +293,9 @@ jobs:
             echo '```'
             kubectl -n "${NAMESPACE}" get analysisrun -o wide
             echo ""
-            kubectl -n "${NAMESPACE}" describe analysisrun \
-              "$(kubectl -n "${NAMESPACE}" get analysisrun -o jsonpath='{.items[-1:].metadata.name}')" \
-              | tail -30
+            LAST_AR=$(kubectl -n "${NAMESPACE}" get analysisrun -o json \
+              | jq -r '.items | sort_by(.metadata.creationTimestamp) | last.metadata.name')
+            kubectl -n "${NAMESPACE}" describe analysisrun "${LAST_AR}" | tail -30
             echo '```'
             echo "### 回滚事件"
             echo '```'

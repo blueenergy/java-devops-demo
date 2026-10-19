@@ -162,6 +162,14 @@ java-demo-parent
 
 **金丝雀分析用 Prometheus 判定在演示环境会假回滚。** 没有真实流量时指标为空 → AnalysisRun 判 `Inconclusive` → Rollout 卡到超时。表面看「回滚了」，实际是超时，两者机制完全不同。改用 Job 探测作为主路径。
 
+**Kustomize 的 `replicas:` 不认 CRD。** 它只匹配 Deployment/StatefulSet/ReplicaSet，而工作负载是 Argo Rollouts 的 `Rollout`。三个 overlay 全部渲染失败，而单个 YAML 的 schema 校验全绿——这类错误只有真正 `kustomize build` 才会暴露，所以 CI 里加了「渲染 overlay 后再校验」一步。
+
+**AnalysisTemplate 没被 base 引用。** Rollout 能创建、Pod 能跑，走到金丝雀分析那一步才报 `analysistemplate not found`。现在移进 `k8s/base/` 并加入 resources。
+
+**`dorny/test-reporter` v3 的 `path` 用逗号分隔，不是换行。** v2 是换行，v3 源码里是 `this.path.split(',')`。照搬老配置会静默失效，只报 `No file matches path`——而文件明明就在那里。`{a,b}` 花括号写法也会被逗号切开，同样失效。
+
+**Trivy 真的拦下了一个 HIGH 漏洞。** Boot 3.5.16 BOM 管理的 PostgreSQL 驱动 42.7.11 有 `CVE-2026-54291`（SCRAM 降级导致中间人防护失效）。在父 POM 里显式覆盖成 42.7.14 解决——BOM 统一管理不代表无懈可击。
+
 ---
 
 ## 这个仓库刻意不做的事

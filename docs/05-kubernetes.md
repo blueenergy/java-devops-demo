@@ -212,6 +212,45 @@ PDB 只约束「主动驱逐」这类 API 调用。所以它是**锦上添花而
 
 `overlays/dev` 与 `overlays/ci` 都用 `$patch: delete` 把 PDB 删掉了，原因写在注释里：单副本下 `minAvailable: 2` 永远无法满足，会让任何节点排水操作被**无限阻塞**。这是「直接把生产配置搬到 dev」的典型翻车点。
 
+## Kustomize 与 CRD 的两个坑（都真实踩过）
+
+**`replicas:` 字段不认 CRD。** kustomization 里的
+
+```yaml
+replicas:
+  - name: order-demo-api
+    count: 3
+```
+
+只会去匹配内置工作负载（Deployment/StatefulSet/ReplicaSet/ReplicationController）。
+我们的工作负载是 Argo Rollouts 的 `Rollout`（CRD），于是渲染直接失败：
+
+```
+Error: resource with name order-demo-api does not match a config with the
+following GVK [Deployment.[noVer].[noGrp] StatefulSet... ReplicationController...]
+```
+
+修法是用 JSON patch：
+
+```yaml
+patches:
+  - target:
+      group: argoproj.io
+      version: v1alpha1
+      kind: Rollout
+      name: order-demo-api
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 3
+```
+
+**`$patch: delete` 必须写准确的资源名。** 它按 apiVersion/kind/name 精确匹配，
+写一个不存在的占位名会报 `no matches for Id ...`。删除多个同类资源要逐个写 patch。
+
+**共同点**：这两个错误都只在 `kustomize build` 时暴露，单文件的 schema 校验全绿。
+所以 CI 的清单校验分两步：先对 base 做 schema 校验，再**渲染每个 overlay 后校验最终产物**。
+
 ## 拓扑分布约束：防止副本全落一个节点
 
 只在 `overlays/prod` 里配，两个 `topologySpreadConstraints`：`topology.kubernetes.io/zone` 与 `kubernetes.io/hostname`，都是 `maxSkew: 1`。
