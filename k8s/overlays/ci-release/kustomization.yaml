@@ -1,0 +1,31 @@
+# CI 的「一次正常发布」overlay：只把镜像 tag 从 ci 换成 ci-v2，其余不变。
+#
+# ------------------------------------------------------------------
+# 为什么需要这个 overlay，而不是用 kubectl argo rollouts restart：
+#
+#   restart 走的是 Rollout 的 spec.restartAt 字段 —— 它只**重启 Pod**，
+#   **不创建新的 ReplicaSet / revision**。实测表现：
+#     - status.currentStepIndex 一直停在 6（终态）
+#     - 从触发到 Healthy 只有 42 秒，而配置里两个 pause 各 30 秒，
+#       根本来不及 —— 说明金丝雀步骤压根没跑
+#
+#   也就是说 restart 演示的是「滚动重启」，不是「金丝雀发布」。
+#   两者在面试里是完全不同的东西，讲混了会被追问穿。
+#
+#   真正能触发金丝雀的是 **pod template 发生变化**。生产里最常见的变化
+#   就是镜像 tag 更新 —— 这里用 ci → ci-v2 精确模拟这一点。
+#   （CD 会用同一份构建产物打两个 tag，所以两个版本代码完全一致，
+#     演示的是发布流程本身，而不是代码差异。）
+# ------------------------------------------------------------------
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: order-demo
+
+resources:
+  - ../ci
+
+images:
+  - name: order-demo-api
+    newName: order-demo-api
+    newTag: ci-v2

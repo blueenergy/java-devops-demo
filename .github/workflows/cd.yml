@@ -107,7 +107,12 @@ jobs:
         run: |
           set -euo pipefail
           docker build -t "${IMAGE}" .
-          docker images "${IMAGE}"
+          # 同一份构建产物再打一个 ci-v2 tag。
+          # 场景 A 用它来制造一次「镜像更新」，从而触发真正的金丝雀发布
+          # （restart 只重启 Pod，不会创建新 revision —— 见 docs/06）。
+          # 两个 tag 内容完全相同：演示的是发布流程，不是代码差异。
+          docker tag "${IMAGE}" order-demo-api:ci-v2
+          docker images "order-demo-api"
 
       - name: 预载镜像到 kind 节点
         run: |
@@ -119,6 +124,8 @@ jobs:
           # 这是 CI 里验证 K8s 部署最快也最可靠的方式。
           # ------------------------------------------------------------------
           kind load docker-image "${IMAGE}" --name "${KIND_CLUSTER_NAME}"
+          # 场景 A 用的 tag 也要预载，否则 apply 后 Pod 会 ImagePullBackOff
+          kind load docker-image order-demo-api:ci-v2 --name "${KIND_CLUSTER_NAME}"
 
       # ================================================================
       # 部署初始版本（v1，健康）
@@ -160,22 +167,23 @@ jobs:
         run: |
           set -euo pipefail
           # ------------------------------------------------------------------
-          # 用 Argo Rollouts 插件自带的 restart 触发新 revision。
+          # 用【镜像更新】触发一次真正的金丝雀发布：
+          #   ci-release overlay 只把 image tag 从 ci 换成 ci-v2。
+          #
+          # 为什么不用 kubectl argo rollouts restart：
+          #   restart 设置的是 Rollout 的 spec.restartAt —— 它只重启 Pod，
+          #   **不创建新 ReplicaSet / revision**，因此金丝雀步骤根本不会执行。
+          #   实测证据：restart 后 status.currentStepIndex 一直停在 6（终态），
+          #   且 42 秒就 Healthy —— 而配置里两个 pause 各 30 秒，时间上根本不够。
+          #   那演示的是「滚动重启」，不是「金丝雀发布」。
           #
           # 为什么不用 kubectl set env：
-          #   kubectl set env rollout/order-demo-api ...
-          # 会失败：
-          #   error: no kind "Rollout" is registered for version
-          #   "argoproj.io/v1alpha1" in scheme "pkg/scheme/scheme.go:28"
-          # 原因是 set env 需要把对象解码成强类型 struct，CRD 不在客户端 scheme 里。
-          #
-          # restart 的行为与 kubectl rollout restart 一致（给 pod template
-          # 打一个 restartedAt 注解），但由插件实现，支持 Rollout。
+          #   CRD 不在 kubectl 客户端 scheme 里，直接报
+          #   no kind "Rollout" is registered ... in scheme。
           #
           # 注意：只改 ConfigMap【不会】触发 Rollout —— 它只监听 pod template。
-          # 这也是为什么场景 B 先改 overlay 再 apply，而不是只改 ConfigMap。
           # ------------------------------------------------------------------
-          kubectl argo rollouts restart order-demo-api -n "${NAMESPACE}"
+          kubectl apply -k k8s/overlays/ci-release
 
       - name: "场景 A：观察金丝雀逐步放量"
         if: inputs.scenario == 'canary-success' || inputs.scenario == 'both' || github.event_name == 'push'

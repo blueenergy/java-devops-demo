@@ -28,8 +28,11 @@ kind: Kustomization
 
 namespace: order-demo
 
+# 基于 ci-release（镜像 ci-v2），这样场景 B 只改故障开关、
+# 不会把镜像从 ci-v2 翻回 ci —— 否则「发布坏版本」里混入了一次镜像回退，
+# 演示的因果就不干净了。
 resources:
-  - ../ci
+  - ../ci-release
 
 patches:
   # 用 JSON6902 只改容器 0 的 env 字段，不碰其它任何字段。

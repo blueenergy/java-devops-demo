@@ -152,11 +152,32 @@ setWeight: 50  →  实际是 2 对 1 ≈ 67%（还受 maxSurge/maxUnavailable �
 ### 触发方式
 
 ```bash
-# 用 Argo 插件自带的 restart 触发新 revision
+# ci-release overlay 只把 image tag 从 ci 换成 ci-v2
+kubectl apply -k k8s/overlays/ci-release
+```
+
+生产里触发金丝雀最自然的就是**镜像更新**——pod template 变了，
+Argo 就会创建新 ReplicaSet 并按 `steps` 走。
+
+**为什么不用 `kubectl argo rollouts restart`**（这是实测踩到的坑）：
+
+```bash
 kubectl argo rollouts restart order-demo-api -n order-demo
 ```
 
-**为什么不是 `kubectl set env`**：
+它设置的是 Rollout 的 `spec.restartAt` 字段 —— **只重启 Pod，
+不创建新 ReplicaSet / revision**，因此金丝雀步骤根本不会执行。
+实测证据：
+
+```
+restart 之后立刻采样：step=6（已是终态）phase=Progressing
+42 秒后：Healthy
+```
+
+而配置里两个 `pause` 各 30 秒，最短也要 60 秒 —— **时间上根本不够**，
+说明步骤一步都没走。它演示的是「滚动重启」，不是「金丝雀发布」。
+
+**为什么不用 `kubectl set env`**：
 
 ```bash
 kubectl -n order-demo set env rollout/order-demo-api DEPLOY_REVISION=...
@@ -165,15 +186,13 @@ kubectl -n order-demo set env rollout/order-demo-api DEPLOY_REVISION=...
 ```
 
 `set env` 需要把对象解码成强类型 struct，而 CRD 不在 kubectl 的客户端 scheme 里。
-`kubectl argo rollouts restart` 由插件实现，行为等价于 `kubectl rollout restart`
-（给 pod template 打 `restartedAt` 注解），但认识 Rollout。
 
 **这里有个高频误区**：只改 ConfigMap 是**不会**触发 Rollout 的。
 Argo Rollouts 与原生 Deployment 一样，只监听 **pod template** 的变化。
 改完 ConfigMap 发现没有任何反应，会以为 Rollout 坏了，实际是它根本没理由重启 Pod。
 
-真实场景中触发新 revision 的是**新镜像 tag**，这里用 restart 模拟。
-注意 restart 只改注解、不改镜像，所以演示的重点是**流程**而不是版本差异。
+> 演示用的 `ci-v2` 与 `ci` 是**同一份构建产物**打了两个 tag，
+> 所以演示的是**发布流程本身**，不是代码差异。真实场景里这一步对应新版本镜像。
 
 ### 观察到的过程
 
@@ -548,7 +567,8 @@ Flagger 把「分析 + 放量 + 回滚」做成闭环控制器，
 | AnalysisRun 一直 `Running` | 探测任务连不上 Service | 检查 NetworkPolicy 是否放行了分析 Pod |
 | Pod 一直 `NotReady` | readiness 探针失败 | `kubectl describe pod` 看事件，确认 `/actuator/health/readiness` 返回 |
 | 回滚后仍有错误 | 故障写在共享 ConfigMap 里，回滚后新建的 Pod 仍会带上 | 把故障写进 pod template（见 `overlays/ci-fault`） |
-| `kubectl set env` 报 `no kind "Rollout" is registered` | CRD 不在客户端 scheme，改用 `kubectl argo rollouts restart` 或 `apply -k` |
+| `kubectl set env` 报 `no kind "Rollout" is registered` | CRD 不在客户端 scheme，改用 `kubectl apply -k <overlay>` 改 pod template |
+| `restart` 后没有走金丝雀步骤、几秒就 Healthy | `spec.restartAt` 只重启 Pod，不产生新 revision。要让金丝雀真跑，必须改 pod template（镜像/env/注解） |
 | Rollout 报 `scaleDownDelaySeconds can only be used with traffic routing` | 未配 trafficRouting 时不能显式设该字段，删掉即可（默认行为不变） |
 | `AnalysisRun` 创建失败 | AnalysisTemplate 不存在或名字拼错 | `kubectl get analysistemplate` |
 | Rollout 显示 Healthy 但流量为 0 | Service selector 与 Pod 标签不匹配 | `kubectl get endpoints <svc>` 看是否为空 |

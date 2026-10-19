@@ -203,7 +203,7 @@ jobs:
           set -euo pipefail
           # ci-fault 是 CD 场景 B 用的故障注入 overlay，同样要校验：
           # 它改的是 Rollout 的容器 env，最容易踩到「数组整体替换」那个坑。
-          for overlay in dev prod ci ci-fault; do
+          for overlay in dev prod ci ci-release ci-fault; do
             echo "::group::overlays/$overlay"
             kubectl kustomize "k8s/overlays/$overlay" > "/tmp/render-${overlay}.yaml"
             docker run --rm -v "/tmp/render-${overlay}.yaml:/m.yaml:ro" \
