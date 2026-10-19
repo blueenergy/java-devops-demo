@@ -80,7 +80,7 @@
           而是 starter-parent 的 pluginManagement 里声明的 execution。
           我们选择自定义父 POM 后，这份绑定跟着丢了，构建却完全不报错：
 
-            --- jar:3.5.0:jar (default-jar) @ demo-api ---   ← 只打瘦 jar
+            [jar:3.5.0:jar (default-jar) @ demo-api]   ← 只打瘦 jar
             （然后就没有然后了，没有 repackage 这一行）
 
           后果链条：target 里没有 -exec.jar → Dockerfile 的 COPY 匹配不到
