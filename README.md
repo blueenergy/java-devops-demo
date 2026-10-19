@@ -55,6 +55,11 @@ open http://localhost:3000                    # Grafana (admin/admin)
 ./mvnw verify
 python3 scripts/check-coverage.py demo-coverage/target/site/jacoco-aggregate/jacoco.xml
 
+# 在 GitHub Actions 的 kind 集群里跑金丝雀发布 + 故障注入自动回滚（约 12 分钟）
+# 本地不需要装 k8s —— "别的环境"就是 runner
+gh workflow run cd.yml -f scenario=both
+gh run watch
+
 # K8s 清单校验（不需要集群，两层）
 python3 scripts/check-k8s-manifests.py          # 跨资源引用一致性
 docker run --rm -v "$PWD/k8s:/m:ro" ghcr.io/yannh/kubeconform:v0.8.0 \
