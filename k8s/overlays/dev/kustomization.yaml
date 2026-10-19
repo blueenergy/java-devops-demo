@@ -81,15 +81,17 @@ patches:
         value:
           - name: LOG_LEVEL
             value: DEBUG
+      # 与 ci overlay 同理：1Gi 限额配合 MaxRAMPercentage=75，
+      # 堆 768Mi + 非堆 ~256Mi。512Mi 限额会让非堆只剩 128Mi，必然 OOMKilled。
       - op: replace
         path: /spec/template/spec/containers/0/resources
         value:
           requests:
             cpu: 100m
-            memory: 384Mi
+            memory: 512Mi
           limits:
             cpu: 500m
-            memory: 512Mi
+            memory: 1Gi
 
 # dev 的金丝雀步进更激进：30 秒就能走完，加快本地迭代
 configMapGenerator:

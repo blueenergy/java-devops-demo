@@ -82,15 +82,17 @@ patches:
             labelSelector:
               matchLabels:
                 app.kubernetes.io/name: order-demo-api
+      # 1.5Gi 限额 → 堆 1152Mi + 非堆 ~384Mi。
+      # 1Gi 时非堆只剩 256Mi，在流量高峰堆吃满的情况下会逼近上限。
       - op: replace
         path: /spec/template/spec/containers/0/resources
         value:
           requests:
             cpu: 500m
-            memory: 768Mi
+            memory: 1Gi
           limits:
             cpu: "2"
-            memory: 1Gi
+            memory: 1536Mi
 
 configMapGenerator:
   - name: order-demo-api-config

@@ -114,12 +114,18 @@ patches:
       kind: Rollout
       name: order-demo-api
     patch: |-
+      # 内存给到 1Gi 是算过的，不是拍的：
+      # JAVA_TOOL_OPTIONS 里 MaxRAMPercentage=75，所以 1Gi 限额下堆上限 768Mi，
+      # 留给非堆（metaspace / code cache / 线程栈 / direct buffer）约 256Mi。
+      # 实测 Spring Boot + Tomcat 的非堆在 150-250Mi 之间。
+      # 之前设 640Mi 时非堆只剩 160Mi，容器会在启动后不久被 OOMKilled，
+      # 而 Pod 事件里只写 "OOMKilled"，不会告诉你是堆还是非堆吃掉的。
       - op: replace
         path: /spec/template/spec/containers/0/resources
         value:
           requests:
             cpu: 100m
-            memory: 384Mi
+            memory: 512Mi
           limits:
             cpu: 500m
-            memory: 640Mi
+            memory: 1Gi
