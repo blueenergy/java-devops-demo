@@ -182,12 +182,19 @@ jobs:
         run: |
           set -euo pipefail
           # 每 5 秒采样一次 Rollout 状态，把放量过程记录下来作为演示证据
+          # 注意不要打印 .status.canary.weights：那是 trafficRouting 才填充的字段，
+          # 没有流量路由器时它永远是空的（打印出来只有 "%"）。
+          # 改为打印步骤序号与副本数 —— 在副本比例模式下，这才是放量的真实指标。
           for i in $(seq 1 24); do
-            WEIGHT=$(kubectl -n "${NAMESPACE}" get rollout order-demo-api \
-              -o jsonpath='{.status.canary.weights.canary.weight}' 2>/dev/null || echo "-")
             PHASE=$(kubectl -n "${NAMESPACE}" get rollout order-demo-api \
               -o jsonpath='{.status.phase}' 2>/dev/null || echo "-")
-            echo "[$i] canaryWeight=${WEIGHT}% phase=${PHASE}"
+            STEP=$(kubectl -n "${NAMESPACE}" get rollout order-demo-api \
+              -o jsonpath='{.status.canary.currentStepIndex}' 2>/dev/null || echo "-")
+            UPDATED=$(kubectl -n "${NAMESPACE}" get rollout order-demo-api \
+              -o jsonpath='{.status.updatedReplicas}' 2>/dev/null || echo "-")
+            READY=$(kubectl -n "${NAMESPACE}" get rollout order-demo-api \
+              -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "-")
+            echo "[$i] step=${STEP} updated=${UPDATED} ready=${READY} phase=${PHASE}"
             if [ "${PHASE}" = "Healthy" ]; then
               echo "✓ 金丝雀发布完成，已全量切换到新版本"
               break

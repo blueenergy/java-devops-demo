@@ -177,14 +177,30 @@ Argo Rollouts 与原生 Deployment 一样，只监听 **pod template** 的变化
 
 ### 观察到的过程
 
+**真实输出**（2026-10-19，GitHub Actions CD run 39195949686）：
+
 ```
-[1] canaryWeight=-   phase=Progressing      ← 新 ReplicaSet 创建中
-[2] canaryWeight=20  phase=Progressing      ← 放量到 20%
-[3] canaryWeight=20  phase=Progressing      ← pause 30s 中
-[4] canaryWeight=20  phase=Progressing      ← AnalysisRun 运行中
-[5] canaryWeight=50  phase=Progressing      ← 分析通过，放量到 50%
-[6] canaryWeight=100 phase=Healthy          ← 全量，发布完成
+[1] canaryWeight=% phase=Progressing
+[2] canaryWeight=% phase=Progressing
+...
+[9] canaryWeight=% phase=Progressing
+[10] canaryWeight=% phase=Healthy
+✓ 金丝雀发布完成，已全量切换到新版本
 ```
+
+**注意 `canaryWeight=` 后面是空的** —— 这不是 bug，而是本文第三节那个局限的
+直接体现：`.status.canary.weights` 只有在配置了 `trafficRouting` 时才会被填充，
+副本比例模式下它是空的。
+
+所以脚本后来改成打印 **步骤序号与副本数**，它们在两种模式下都有意义：
+
+```
+[i] step=${STEP} updated=${UPDATED} ready=${READY} phase=${PHASE}
+```
+
+**这个细节本身就值得记住**：监控面板上的某个指标一直为空时，
+先确认这个指标在当前配置下是否本来就该有值，
+而不是急着去查「为什么采集不到」。
 
 ### 判定逻辑
 
@@ -279,49 +295,58 @@ Kubernetes 根本不会把流量切给它——金丝雀分析还没开始跑，
 
 ### 观察到的过程
 
+**真实输出**（同一次 CD run）：
+
 ```
-[1] rollout=Progressing analysisRun=-          ← 新版本开始放量
-[2] rollout=Progressing analysisRun=Running    ← 分析任务启动
-[3] rollout=Progressing analysisRun=Running    ← 第 1 次探测失败
-[4] rollout=Degraded    analysisRun=Failed     ← 第 2 次失败，达 failureLimit，判定 Failed
-                                                ← Rollout 自动中止，stable 切回旧版本
+[1]..[8]   rollout=Progressing analysisRun=-        新 ReplicaSet 创建、等待就绪
+[9]..[13]  rollout=Paused      analysisRun=-        pause 30s（放量前的观察期）
+[14]..[17] rollout=Progressing analysisRun=Running  分析任务启动，探测业务接口
+[18]       rollout=Degraded    analysisRun=Failed   连续失败达到 failureLimit，自动中止
+✓ 金丝雀分析判定失败，Rollout 已中止
 ```
+
+整个过程约 **90 秒**，其中人工介入 **0 秒**。
 
 ### 回滚证据
 
 ```bash
-kubectl argo rollouts get rollout order-demo-api -n order-demo
+kubectl -n order-demo describe rollout order-demo-api | grep -A3 -iE 'RolloutAborted'
 ```
 
-```
-Name:            order-demo-api
-Namespace:       order-demo
-Status:          ✖ Degraded
-Strategy:        Canary
-  Step:          1/6
-  SetWeight:     20
-  ActualWeight:  0
-Images:          order-demo-api:ci (stable)
-Replicas:
-  Desired:       3
-  Current:       3
-  Updated:       0
-  Ready:         3
-  Available:     3
+**真实输出**（本次 CD run，原样摘录）：
 
-NAME                                                    KIND         STATUS     AGE
-⟳ order-demo-api                                        Rollout      ✖ Degraded 5m
-├──# revision:2
-│  └──⧉ order-demo-api-7d9f8b6c4                        ReplicaSet   • Progressing
-└──# revision:1
-   └──⧉ order-demo-api-5c8f7a3b2                        ReplicaSet   ✔ Healthy
-      ├──□ order-demo-api-5c8f7a3b2-abcde               Pod          ✔ Running
-      ├──□ order-demo-api-5c8f7a3b2-fghij               Pod          ✔ Running
-      └──□ order-demo-api-5c8f7a3b2-klmno               Pod          ✔ Running
+```
+Degraded
+    Reason:                RolloutAborted
+  Message:                 RolloutAborted: Rollout aborted update to revision 2:
+                           Step-based analysis phase error/failed:
+                           Metric "smoke-test" assessed Failed due to
+                           failed (2) > failureLimit (1)
+  Phase:                   Degraded
+
+  Warning  RolloutAborted  1s  rollouts-controller
+           Rollout aborted update to revision 2: Step-based analysis phase
+           error/failed: Metric "smoke-test" assessed Failed due to
+           failed (2) > failureLimit (1)
 ```
 
-注意 **`ActualWeight: 0`** —— 这是回滚生效的直接证据：
-canary 的权重被清零，流量全部回到 stable。
+这三行就是面试时要展示的核心证据：
+
+| 字段 | 说明 |
+|---|---|
+| `Reason: RolloutAborted` | 不是超时、不是手工中止，是**分析判定失败**触发的中止 |
+| `failed (2) > failureLimit (1)` | 第 2 次探测失败时达到阈值 —— 时序与配置完全对得上 |
+| `update to revision 2` | 被中止的是新版本，`revision 1` 继续服务 |
+
+随后脚本还验证了稳定性：
+
+```bash
+kubectl exec <stable-pod> -- wget -qO- http://localhost:8080/actuator/health/readiness
+# ✓ 稳定版本仍在正常服务
+```
+
+**只看 Rollout 状态是不够的** —— `Degraded` 只说明发布中止了，
+不代表服务已恢复。必须实际打一次接口确认，这是「回滚完成」与「回滚成功」的区别。
 
 ```bash
 kubectl -n order-demo get analysisrun
