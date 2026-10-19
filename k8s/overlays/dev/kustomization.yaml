@@ -1,0 +1,82 @@
+# 开发环境叠加层：单副本、详细日志、放宽资源限制。
+#
+# 环境差异全部在这里表达，base 保持环境无关。
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: order-demo-dev
+
+resources:
+  - ../../base
+
+# 统一加环境标签。Prometheus 与 Grafana 靠它区分环境，
+# 排查时「这个问题只出现在 dev 还是 prod 也有」是最先要回答的问题。
+commonLabels:
+  env: dev
+
+# 镜像覆盖。dev 用固定 tag，不做 digest 锁定 —— 迭代快优先。
+# 生产用 digest，见 overlays/prod。
+images:
+  - name: order-demo-api
+    newName: ghcr.io/blueenergy/java-devops-demo/demo-api
+    newTag: dev
+
+# 单副本即可，省资源
+replicas:
+  - name: order-demo-api
+    count: 1
+
+patches:
+  # dev 环境不需要 HPA 和 PDB：单副本下 PDB 的 minAvailable: 2 永远无法满足，
+  # 会导致节点排水被无限阻塞。这是「直接把生产配置搬到 dev」的典型翻车点。
+  - target:
+      kind: HorizontalPodAutoscaler
+      name: order-demo-api
+    patch: |-
+      $patch: delete
+      apiVersion: autoscaling/v2
+      kind: HorizontalPodAutoscaler
+      metadata:
+        name: order-demo-api
+
+  - target:
+      kind: PodDisruptionBudget
+      name: order-demo-api
+    patch: |-
+      $patch: delete
+      apiVersion: policy/v1
+      kind: PodDisruptionBudget
+      metadata:
+        name: order-demo-api
+
+  # dev 打开 DEBUG 日志，并放宽资源限制（本地 kind 集群资源有限）
+  - target:
+      kind: Rollout
+      name: order-demo-api
+    patch: |-
+      apiVersion: argoproj.io/v1alpha1
+      kind: Rollout
+      metadata:
+        name: order-demo-api
+      spec:
+        template:
+          spec:
+            containers:
+              - name: order-demo-api
+                env:
+                  - name: LOG_LEVEL
+                    value: DEBUG
+                resources:
+                  requests:
+                    cpu: 100m
+                    memory: 384Mi
+                  limits:
+                    cpu: 500m
+                    memory: 512Mi
+
+# dev 的金丝雀步进更激进：30 秒就能走完，加快本地迭代
+configMapGenerator:
+  - name: order-demo-api-config
+    behavior: merge
+    literals:
+      - LOG_LEVEL=DEBUG

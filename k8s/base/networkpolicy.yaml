@@ -1,0 +1,113 @@
+# 默认拒绝所有入站流量，再按需放行。
+#
+# 这是「零信任」在 Pod 网络层的落地：不写任何 NetworkPolicy 时，
+# 集群内任意 Pod 都能访问任意其它 Pod —— 一个被攻破的边缘服务
+# 可以直接连数据库。NetworkPolicy 把爆炸半径限制在显式声明的调用关系内。
+#
+# 前提：集群的 CNI 必须支持 NetworkPolicy。
+#   kind 默认的 kindnet 不支持，需要 Calico/Cilium；
+#   GKE/EKS/AKS 的默认 CNI 支持。
+#   不支持时这些对象会被接受但静默不生效 —— 这是一个容易误判「已经加固了」的陷阱，
+#   验证方法是在 Pod 里实际 curl 一个本该被拒绝的地址。
+---
+# 默认拒绝：选中本 namespace 所有 Pod，不允许任何入站
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  labels:
+    app.kubernetes.io/part-of: order-demo
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+
+---
+# 放行：允许访问订单服务的 8080 端口
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: order-demo-api-allow-ingress
+  labels:
+    app.kubernetes.io/name: order-demo-api
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: order-demo-api
+  policyTypes:
+    - Ingress
+  ingress:
+    # 来自 Ingress Controller 的流量
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - port: 8080
+          protocol: TCP
+
+    # 集群内其它业务服务的调用
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: order-demo
+      ports:
+        - port: 8080
+          protocol: TCP
+
+    # 金丝雀分析的探测任务。
+    # 少了这条，AnalysisRun 的 Job 连不上 canary Service，
+    # 金丝雀会一直判 Inconclusive 直到超时 —— 表面看像「回滚了」，实际是探测根本没打通。
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: canary-analysis
+      ports:
+        - port: 8080
+          protocol: TCP
+
+    # Prometheus 抓取指标
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - port: 8080
+          protocol: TCP
+
+---
+# 放行：订单服务访问数据库
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: order-demo-api-allow-egress-postgres
+  labels:
+    app.kubernetes.io/name: order-demo-api
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: order-demo-api
+  policyTypes:
+    - Egress
+  egress:
+    # PostgreSQL
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: order-demo-postgres
+      ports:
+        - port: 5432
+          protocol: TCP
+
+    # DNS 解析。极易遗漏的一条 —— 少了它所有出站连接都会因为解析不了域名而失败，
+    # 报错信息是「UnknownHostException」，看起来像 DNS 服务坏了，
+    # 实际是自己把 DNS 查询给拦了。
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP

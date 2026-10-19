@@ -1,0 +1,41 @@
+# 构建上下文越小，docker build 越快，且越不容易把敏感文件打进镜像。
+#
+# 注意：这里排除了 .git，意味着 Docker 构建时 git-commit-id 插件拿不到仓库信息。
+# 这正是 demo-api/pom.xml 里必须设 <failOnNoGitDirectory>false</failOnNoGitDirectory>
+# 的原因——否则 docker build 会直接失败。
+# 若确实需要镜像里带 commit 信息，改为构建时用 --build-arg 传入，而不是把 .git 塞进上下文。
+
+# ===== 版本控制与 CI =====
+.git
+.gitignore
+.github
+
+# ===== 构建产物 =====
+**/target/
+*.jar
+*.war
+
+# ===== IDE =====
+.idea
+*.iml
+.vscode
+.settings
+.classpath
+.project
+
+# ===== 文档与本地环境 =====
+docs/
+*.md
+!README.md
+docker-compose.yml
+k8s/
+observability/
+scripts/
+.env
+.env.*
+
+# ===== 缓存与日志 =====
+**/.m2/
+*.log
+logs/
+.DS_Store

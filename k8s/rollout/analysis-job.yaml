@@ -1,0 +1,116 @@
+# 金丝雀分析的【主路径】—— 用 Job 探测，不依赖 Prometheus。
+#
+# ==========================================================================
+# 为什么不用 Prometheus 做金丝雀判定（这是本项目最重要的一个设计决策）
+# ==========================================================================
+#
+# 直觉上应该用 Prometheus 查错误率：
+#   sum(rate(http_server_requests_seconds_count{status=~"5.."}[1m]))
+#   / sum(rate(http_server_requests_seconds_count[1m])) > 0.05
+#
+# 但在 kind 这类演示集群里，金丝雀期间【没有真实用户流量】：
+#   - 没有 Ingress 接入真实请求
+#   - 没有压测工具在打流量
+#   - 唯一打到 canary 的就是分析任务自己
+#
+# 于是错误率的分母是 0 或接近 0，PromQL 返回空集。
+# Argo Rollouts 拿到空结果会判定为 Inconclusive（不确定），
+# 而 Inconclusive 不会让分析失败 —— 它会一直重试直到
+# progressDeadlineSeconds 超时，Rollout 才转为 Degraded。
+#
+# 表面现象是「发布失败了、回滚了」，看起来符合预期。
+# 但实际机制完全不同：不是「分析发现错误率超标所以回滚」，
+# 而是「探测一直没结果所以超时了」。
+#
+# 面试时把这两者讲混，会暴露「照着文档配了但没真正跑过」。
+# 真实的故障定位路径、回滚触发条件、以及要调的参数都不一样。
+#
+# Job 探测没有这个问题：容器退出码就是判定结果，秒级、确定、日志可读。
+# Prometheus 版本作为加分项另见 analysis-prometheus.yaml。
+# ==========================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: order-demo-api-smoke
+  labels:
+    app.kubernetes.io/name: order-demo-api
+    app.kubernetes.io/part-of: order-demo
+spec:
+  args:
+    - name: service-name
+      # 默认值仅作兜底，实际由 rollout.yaml 的 analysis.args 传入
+      value: order-demo-api-canary
+  metrics:
+    - name: smoke-test
+      # 每 10 秒跑一次，共 3 次。
+      # count 与 interval 的乘积就是分析的总时长（30 秒）。
+      # 太短会被 JVM 冷启动的慢响应误判，太长会拖慢发布节奏。
+      interval: 10s
+      count: 3
+      # 允许失败 1 次。设为 0 意味着任何一次网络抖动都会中止发布 —— 太敏感。
+      # 设为 3 则等于关掉判定。1 是「容忍单次抖动，但不容忍持续性故障」。
+      failureLimit: 1
+      # Job 容器会 echo "ok"，所以成功条件是输出等于 ok。
+      successCondition: result == "ok"
+      provider:
+        job:
+          spec:
+            # backoffLimit: 0 —— 失败不重试。
+            # 重试会掩盖真实故障：应用持续返回 500 时，重试只是把
+            # 「立即失败」变成「30 秒后失败」，判定结论完全一样，只是更慢。
+            backoffLimit: 0
+            # 兜底超时，防止探测任务卡死导致整个分析挂起
+            activeDeadlineSeconds: 60
+            template:
+              metadata:
+                labels:
+                  app.kubernetes.io/component: canary-analysis
+                  app.kubernetes.io/part-of: order-demo
+              spec:
+                restartPolicy: Never
+                # 探测任务不需要访问 k8s API
+                automountServiceAccountToken: false
+                securityContext:
+                  runAsNonRoot: true
+                  runAsUser: 10001
+                  seccompProfile:
+                    type: RuntimeDefault
+                containers:
+                  - name: smoke
+                    # 用 curl 镜像而不是在业务镜像里塞探测脚本：
+                    # 探测逻辑与业务镜像解耦，业务镜像可以保持最小。
+                    image: curlimages/curl:8.11.0
+                    securityContext:
+                      allowPrivilegeEscalation: false
+                      readOnlyRootFilesystem: true
+                      capabilities:
+                        drop: ["ALL"]
+                    command: ["sh", "-c"]
+                    args:
+                      - |
+                        set -eu
+                        BASE="http://{{args.service-name}}:8080"
+
+                        # 1) 就绪探针必须通过
+                        curl -sf --max-time 5 "$BASE/actuator/health/readiness" > /dev/null
+
+                        # 2) 关键业务路径：写一笔订单再读回来。
+                        #    只探活是不够的 —— 应用完全可能「活着但业务全挂」
+                        #    （比如数据库连接池耗尽、迁移脚本没跑）。
+                        #    金丝雀要验证的是业务可用性，不是进程存活。
+                        ORDER=$(curl -sf --max-time 5 -X POST "$BASE/api/v1/orders" \
+                          -H 'Content-Type: application/json' \
+                          -d '{"symbol":"CANARY","quantity":1,"unitPrice":1.0}')
+
+                        ID=$(echo "$ORDER" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p')
+                        if [ -z "$ID" ]; then
+                          echo "failed: 创建订单未返回 id, 响应=$ORDER" >&2
+                          exit 1
+                        fi
+
+                        curl -sf --max-time 5 "$BASE/api/v1/orders/$ID" > /dev/null
+
+                        # 3) 撤单，验证状态机在真实数据库上正常工作
+                        curl -sf --max-time 5 -X POST "$BASE/api/v1/orders/$ID/cancel" > /dev/null
+
+                        echo -n ok

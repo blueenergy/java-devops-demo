@@ -1,0 +1,63 @@
+# Argo Rollouts 的金丝雀需要两个 Service。
+# 切换版本时，Argo 通过修改这两个 Service 的 selector 来导流，
+# 而不是去改 Pod 本身 —— 这也是为什么 Rollout 能瞬间完成回滚：
+# 把 stableService 的 selector 指回旧 ReplicaSet 的 pod-template-hash 即可。
+
+---
+# 稳定版流量入口。Ingress / 上游调用方只认这一个 Service。
+apiVersion: v1
+kind: Service
+metadata:
+  name: order-demo-api-stable
+  labels:
+    app.kubernetes.io/name: order-demo-api
+    app.kubernetes.io/component: backend
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: order-demo-api
+
+---
+# 金丝雀流量入口。主要给 AnalysisTemplate 的探测任务使用。
+# 不对外暴露 —— 真实用户流量是否按比例进来，取决于有没有配 trafficRouting。
+apiVersion: v1
+kind: Service
+metadata:
+  name: order-demo-api-canary
+  labels:
+    app.kubernetes.io/name: order-demo-api
+    app.kubernetes.io/component: backend
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: order-demo-api
+
+---
+# 给集群内其它服务用的统一入口，始终指向稳定版。
+# 让调用方不必关心当前有没有正在进行的金丝雀发布。
+apiVersion: v1
+kind: Service
+metadata:
+  name: order-demo-api
+  labels:
+    app.kubernetes.io/name: order-demo-api
+    app.kubernetes.io/component: backend
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: order-demo-api

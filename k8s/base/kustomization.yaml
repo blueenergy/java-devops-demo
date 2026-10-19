@@ -1,0 +1,37 @@
+# Kustomize base：所有环境共享的资源定义。
+#
+# 为什么用 Kustomize 而不是 Helm：
+#   Kustomize 是 kubectl 内置的（kubectl apply -k），零额外依赖，
+#   且它是「叠加」模型 —— base 就是合法的原生 YAML，可以直接 apply 和阅读，
+#   不需要先渲染模板才能看懂部署了什么。
+#   Helm 是「模板」模型，优势在参数化与包管理（版本、依赖、rollback），
+#   适合对外分发的通用组件（如 ingress-nginx、prometheus）。
+#
+#   选择标准：部署自己的应用、环境差异靠叠加表达 → Kustomize；
+#             分发可配置的通用组件、需要版本化与依赖管理 → Helm。
+#   本项目两种都展示：Kustomize 为主路径，observability 那套若上集群会用 Helm。
+#
+# 环境差异一律通过 overlays/ 表达，base 里不出现任何环境特定值。
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: order-demo
+
+commonLabels:
+  app.kubernetes.io/part-of: order-demo
+
+resources:
+  - namespace.yaml
+  - serviceaccount.yaml
+  - configmap.yaml
+  - secret.yaml
+  - postgres.yaml
+  - service.yaml
+  - rollout.yaml
+  - hpa.yaml
+  - pdb.yaml
+  - networkpolicy.yaml
+  # ServiceMonitor 依赖 Prometheus Operator 的 CRD。
+  # 集群里没装 Operator 时 apply 会报 "no matches for kind ServiceMonitor"。
+  # 因此它默认被注释掉 —— 需要时在 overlay 里按需启用，而不是让 base 强制依赖。
+  # - servicemonitor.yaml

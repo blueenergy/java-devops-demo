@@ -1,0 +1,124 @@
+# 告警规则。
+#
+# 设计原则：每条告警都必须对应一个「人会采取的行动」。
+# 没有行动的告警就是噪音，而噪音会让真正的告警被忽略——这是告警体系失效的最常见原因。
+#
+# 所有规则都带 for 子句。瞬时尖峰不值得半夜叫人，
+# for 的作用是要求异常持续一段时间，滤掉抖动。
+
+groups:
+
+  - name: order-demo-availability
+    interval: 15s
+    rules:
+
+      - alert: OrderDemoApiDown
+        # up 是 Prometheus 自己生成的指标：1 表示抓取成功，0 表示失败。
+        # 它不需要应用配合，是最可靠的第一道告警。
+        expr: up{job="order-demo-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "订单服务实例不可达"
+          description: "{{ $labels.instance }} 已连续 1 分钟无法抓取指标。检查 Pod 状态与就绪探针。"
+          runbook_url: "docs/runbook.md#api-不可达"
+
+      - alert: OrderDemoHighErrorRate
+        # 5xx 占比。分母用总量而不是「成功数」，避免分母为 0 时除零。
+        expr: |
+          (
+            sum(rate(http_server_requests_seconds_count{application="order-demo-api", status=~"5.."}[5m]))
+            /
+            sum(rate(http_server_requests_seconds_count{application="order-demo-api"}[5m]))
+          ) > 0.05
+        for: 2m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "订单服务 5xx 错误率超过 5%"
+          description: "当前错误率 {{ $value | humanizePercentage }}，持续 2 分钟。检查最近的发布与依赖状态。"
+          runbook_url: "docs/runbook.md#错误率升高"
+
+      - alert: OrderDemoHighLatencyP99
+        # histogram_quantile 需要直方图桶。这就是 application.yml 里
+        # management.metrics.distribution.percentiles-histogram 要打开的原因——
+        # 不打开的话只有 sum/count，算不出分位数。
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum(rate(http_server_requests_seconds_bucket{application="order-demo-api"}[5m])) by (le)
+          ) > 0.5
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "订单服务 P99 延迟超过 500ms"
+          description: "当前 P99 = {{ $value | humanizeDuration }}。检查数据库慢查询与连接池等待。"
+
+  - name: order-demo-resources
+    interval: 30s
+    rules:
+
+      - alert: OrderDemoJvmHeapPressure
+        # 堆使用率持续高位。注意用 max 而不是 committed：
+        # committed 会随 JVM 扩堆变化，用它做分母会掩盖真实的压力。
+        expr: |
+          (
+            sum(jvm_memory_used_bytes{application="order-demo-api", area="heap"})
+            /
+            sum(jvm_memory_max_bytes{application="order-demo-api", area="heap"})
+          ) > 0.9
+        for: 10m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "订单服务 JVM 堆使用率超过 90%"
+          description: "持续 10 分钟高于 90%，GC 开销将显著上升。检查是否有内存泄漏或需要调大堆。"
+
+      - alert: OrderDemoDbConnectionPoolSaturated
+        # HikariCP 的等待连接数。持续有线程在等连接，说明池子太小或存在慢查询占着连接。
+        expr: |
+          hikaricp_connections_pending{application="order-demo-api"} > 0
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "订单服务数据库连接池出现排队"
+          description: "已有线程在等待连接超过 5 分钟。检查 DB_POOL_MAX_SIZE 与数据库侧连接上限。"
+
+  - name: order-demo-business
+    interval: 30s
+    rules:
+
+      - alert: OrderDemoFaultInjectionActive
+        # 演示用的安全网：故障注入忘了关，会让这个「演示」变成真实事故。
+        # 生产环境不应该存在这个指标——它的存在本身就是配置错误的信号。
+        expr: |
+          sum(increase(fault_injected_total{application="order-demo-api"}[5m])) > 0
+        for: 0m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "订单服务正在注入故障"
+          description: "检测到 fault_injected_total 增长。若非在做混沌演练，请立即关闭 app.fault.enabled。"
+
+      - alert: OrderDemoNoTraffic
+        # 有实例在跑但完全没有请求，通常意味着上游路由配错了。
+        expr: |
+          sum(rate(http_server_requests_seconds_count{application="order-demo-api"}[10m])) == 0
+          and
+          up{job="order-demo-api"} == 1
+        for: 10m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "订单服务实例存活但无流量"
+          description: "实例可抓取但 10 分钟内零请求。检查 Service selector 与 Ingress 规则。"

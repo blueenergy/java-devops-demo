@@ -1,0 +1,323 @@
+name: CD
+
+# 手动触发为主，因为这是一个【演示】流水线：
+# 它会在 GitHub runner 里起一个真实的 kind 集群，跑完整的
+# 金丝雀发布 + 故障注入 + 自动回滚，整个过程 10-15 分钟。
+# 挂在每次 push 上会浪费额度，且和 CI 的定位重叠。
+on:
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: '要演示的场景'
+        type: choice
+        required: true
+        default: both
+        options:
+          - canary-success
+          - canary-rollback
+          - both
+  push:
+    tags: ['v*.*.*']
+
+concurrency:
+  group: cd-${{ github.ref }}
+  cancel-in-progress: false   # 部署不能被打断，否则集群会停在中间状态
+
+permissions:
+  contents: read
+
+env:
+  ARGO_ROLLOUTS_VERSION: v1.10.1
+  KIND_CLUSTER_NAME: order-demo
+  NAMESPACE: order-demo
+  IMAGE: order-demo-api:ci
+
+jobs:
+  canary-demo:
+    name: 金丝雀发布与自动回滚
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v7
+
+      # ================================================================
+      # 环境准备
+      # ================================================================
+
+      - name: 创建 kind 集群
+        uses: helm/kind-action@v1.15.1
+        with:
+          cluster_name: ${{ env.KIND_CLUSTER_NAME }}
+          # 固定 kind 版本，避免上游更新导致演示行为漂移
+          version: v0.33.0
+          # 关掉默认的 local-path provisioner 也行，但 PostgreSQL 需要 PVC，
+          # kind 自带的 local-path provisioner 已能满足，保持默认。
+          wait: 120s
+
+      - name: 安装 Argo Rollouts
+        run: |
+          set -euo pipefail
+          # ------------------------------------------------------------------
+          # 关键：argoproj/argo-rollouts 不是一个 GitHub Action。
+          #
+          # 很容易误写成 `uses: argoproj/argo-rollouts@v1.10.1` ——
+          # 该仓库根目录没有 action.yml，这样写会在流水线启动时直接报
+          # "Can't find 'action.yml'"，且错误信息不会提示你「这不是一个 Action」。
+          #
+          # 正确做法是下载官方 install.yaml 用 kubectl 应用。
+          # ------------------------------------------------------------------
+          kubectl create namespace argo-rollouts --dry-run=client -o yaml | kubectl apply -f -
+          kubectl apply -n argo-rollouts \
+            -f "https://github.com/argoproj/argo-rollouts/releases/download/${ARGO_ROLLOUTS_VERSION}/install.yaml"
+          kubectl -n argo-rollouts rollout status deployment/argo-rollouts --timeout=180s
+
+      - name: 安装 kubectl-argo-rollouts 插件
+        run: |
+          set -euo pipefail
+          # ------------------------------------------------------------------
+          # CRD 装好只让集群认识 Rollout 资源；
+          # `kubectl argo rollouts ...` 这条子命令来自一个独立的 kubectl 插件，
+          # 不装的话会报 "unknown command"，而不是提示你缺插件。
+          # ------------------------------------------------------------------
+          curl -sSL -o /tmp/kubectl-argo-rollouts \
+            "https://github.com/argoproj/argo-rollouts/releases/download/${ARGO_ROLLOUTS_VERSION}/kubectl-argo-rollouts-linux-amd64"
+          chmod +x /tmp/kubectl-argo-rollouts
+          sudo mv /tmp/kubectl-argo-rollouts /usr/local/bin/
+          kubectl argo rollouts version
+
+      - name: 构建镜像
+        run: |
+          set -euo pipefail
+          docker build -t "${IMAGE}" .
+          docker images "${IMAGE}"
+
+      - name: 预载镜像到 kind 节点
+        run: |
+          set -euo pipefail
+          # ------------------------------------------------------------------
+          # 关键：GHCR 的包默认是私有的，kind 节点里没有 imagePullSecret，
+          # 直接部署会卡在 ImagePullBackOff。
+          # `kind load` 把镜像直接塞进节点，完全绕过 registry ——
+          # 这是 CI 里验证 K8s 部署最快也最可靠的方式。
+          # ------------------------------------------------------------------
+          kind load docker-image "${IMAGE}" --name "${KIND_CLUSTER_NAME}"
+
+      # ================================================================
+      # 部署初始版本（v1，健康）
+      # ================================================================
+
+      - name: 应用 K8s 清单
+        run: |
+          set -euo pipefail
+          kubectl apply -k k8s/overlays/ci
+
+      - name: 等待 PostgreSQL 就绪
+        run: |
+          set -euo pipefail
+          kubectl -n "${NAMESPACE}" rollout status deployment/order-demo-postgres --timeout=180s
+
+      - name: 等待 v1 发布完成
+        run: |
+          set -euo pipefail
+          # 初始部署也要等健康，否则后续的金丝雀演示会建立在错误的前提上
+          kubectl argo rollouts status order-demo-api -n "${NAMESPACE}" --timeout 300s
+
+      - name: 记录 v1 基线状态
+        run: |
+          set -euo pipefail
+          {
+            echo "## 基线：v1 已就绪"
+            echo ""
+            echo '```'
+            kubectl argo rollouts get rollout order-demo-api -n "${NAMESPACE}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ================================================================
+      # 场景 A：金丝雀发布成功
+      # ================================================================
+
+      - name: "场景 A：触发一次正常发布"
+        if: inputs.scenario == 'canary-success' || inputs.scenario == 'both' || github.event_name == 'push'
+        run: |
+          set -euo pipefail
+          # ------------------------------------------------------------------
+          # 改 Pod 模板才能触发新 revision。
+          #
+          # 注意：只改 ConfigMap 是【不会】触发 Rollout 的 ——
+          # Argo Rollouts 与原生 Deployment 一样，只监听 pod template 的变化。
+          # 这是个高频误区：改完 ConfigMap 发现没有任何反应，
+          # 以为 Rollout 坏了，实际是它根本没理由重启 Pod。
+          #
+          # 这里注入一个 DEPLOY_REVISION 环境变量来强制产生新 revision，
+          # 真实场景中这个变化来自新镜像 tag。
+          # ------------------------------------------------------------------
+          kubectl -n "${NAMESPACE}" set env rollout/order-demo-api \
+            DEPLOY_REVISION="a-$(date +%s)" \
+            FAULT_ENABLED="false" \
+            FAULT_ERROR_RATE="0.0"
+
+      - name: "场景 A：观察金丝雀逐步放量"
+        if: inputs.scenario == 'canary-success' || inputs.scenario == 'both' || github.event_name == 'push'
+        run: |
+          set -euo pipefail
+          # 每 5 秒采样一次 Rollout 状态，把放量过程记录下来作为演示证据
+          for i in $(seq 1 24); do
+            WEIGHT=$(kubectl -n "${NAMESPACE}" get rollout order-demo-api \
+              -o jsonpath='{.status.canary.weights.canary.weight}' 2>/dev/null || echo "-")
+            PHASE=$(kubectl -n "${NAMESPACE}" get rollout order-demo-api \
+              -o jsonpath='{.status.phase}' 2>/dev/null || echo "-")
+            echo "[$i] canaryWeight=${WEIGHT}% phase=${PHASE}"
+            if [ "${PHASE}" = "Healthy" ]; then
+              echo "✓ 金丝雀发布完成，已全量切换到新版本"
+              break
+            fi
+            sleep 5
+          done
+
+          kubectl argo rollouts status order-demo-api -n "${NAMESPACE}" --timeout 120s
+
+      - name: "场景 A：记录成功证据"
+        if: inputs.scenario == 'canary-success' || inputs.scenario == 'both' || github.event_name == 'push'
+        run: |
+          set -euo pipefail
+          {
+            echo ""
+            echo "## 场景 A：金丝雀发布成功"
+            echo ""
+            echo '```'
+            kubectl argo rollouts get rollout order-demo-api -n "${NAMESPACE}"
+            echo ""
+            echo "--- AnalysisRun 列表 ---"
+            kubectl -n "${NAMESPACE}" get analysisrun
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ================================================================
+      # 场景 B：故障注入 → 金丝雀分析失败 → 自动回滚
+      # ================================================================
+
+      - name: "场景 B：发布一个「坏」版本"
+        if: inputs.scenario == 'canary-rollback' || inputs.scenario == 'both'
+        run: |
+          set -euo pipefail
+          # ------------------------------------------------------------------
+          # 故障通过 Pod 模板里的环境变量注入，而不是改 ConfigMap。
+          #
+          # 这个区别很关键：ConfigMap 是 stable 与 canary 共享的，
+          # 改它会把正在服务的稳定版一起打挂 —— 那演示的就不是
+          # 「金丝雀拦住了坏版本」，而是「我手动把服务搞挂了」。
+          #
+          # 放进 pod template 后，故障只存在于新 ReplicaSet 的 Pod 里，
+          # stable 版本不受影响，这才是真实的金丝雀语义。
+          #
+          # FAULT_ENABLED 只影响 /api/**，刻意绕开 /actuator/**，
+          # 所以新 Pod 能正常就绪、正常接流量，
+          # 由 AnalysisTemplate 通过业务接口探测到 500 —— 而非启动失败。
+          # ------------------------------------------------------------------
+          echo "发布带故障的新版本（50% 请求返回 500）..."
+          kubectl -n "${NAMESPACE}" set env rollout/order-demo-api \
+            DEPLOY_REVISION="b-$(date +%s)" \
+            FAULT_ENABLED="true" \
+            FAULT_ERROR_RATE="0.5"
+
+      - name: "场景 B：观察自动回滚"
+        if: inputs.scenario == 'canary-rollback' || inputs.scenario == 'both'
+        run: |
+          set -euo pipefail
+          # 期望的结果是 Rollout 进入 Degraded / 回滚，所以这里不能因为
+          # 命令非零退出就中断 —— 那恰恰是我们要的成功路径。
+          set +e
+          for i in $(seq 1 36); do
+            PHASE=$(kubectl -n "${NAMESPACE}" get rollout order-demo-api \
+              -o jsonpath='{.status.phase}' 2>/dev/null || echo "-")
+            AR_PHASE=$(kubectl -n "${NAMESPACE}" get analysisrun \
+              -o jsonpath='{.items[-1:].status.phase}' 2>/dev/null || echo "-")
+            echo "[$i] rollout=${PHASE} analysisRun=${AR_PHASE}"
+            if [ "${PHASE}" = "Degraded" ] || [ "${AR_PHASE}" = "Failed" ]; then
+              echo "✓ 金丝雀分析判定失败，Rollout 已中止"
+              break
+            fi
+            sleep 5
+          done
+          set -e
+
+      - name: "场景 B：确认已回滚到稳定版本"
+        if: inputs.scenario == 'canary-rollback' || inputs.scenario == 'both'
+        run: |
+          set -euo pipefail
+          echo "--- Rollout 状态 ---"
+          kubectl -n "${NAMESPACE}" get rollout order-demo-api \
+            -o jsonpath='{.status.phase}{"\n"}{.status.canary.currentStepIndex}{"\n"}'
+
+          echo "--- 回滚事件 ---"
+          kubectl -n "${NAMESPACE}" describe rollout order-demo-api | grep -A3 -iE 'RolloutAborted|RolloutDegraded' || true
+
+          # 验证稳定版本仍然可用 —— 这是回滚是否真正生效的最终判据。
+          # 只看 Rollout 状态是不够的：状态为 Degraded 不代表服务已恢复，
+          # 要实际打一次接口确认。
+          STABLE_POD=$(kubectl -n "${NAMESPACE}" get pods \
+            -l app.kubernetes.io/name=order-demo-api \
+            -o jsonpath='{.items[0].metadata.name}')
+          kubectl -n "${NAMESPACE}" exec "${STABLE_POD}" -- \
+            wget -qO- http://localhost:8080/actuator/health/readiness
+          echo ""
+          echo "✓ 稳定版本仍在正常服务"
+
+      - name: "场景 B：记录回滚证据"
+        if: inputs.scenario == 'canary-rollback' || inputs.scenario == 'both'
+        run: |
+          set -euo pipefail
+          {
+            echo ""
+            echo "## 场景 B：故障注入触发自动回滚"
+            echo ""
+            echo "### Rollout 最终状态"
+            echo '```'
+            kubectl argo rollouts get rollout order-demo-api -n "${NAMESPACE}"
+            echo '```'
+            echo "### AnalysisRun（失败的那次）"
+            echo '```'
+            kubectl -n "${NAMESPACE}" get analysisrun -o wide
+            echo ""
+            kubectl -n "${NAMESPACE}" describe analysisrun \
+              "$(kubectl -n "${NAMESPACE}" get analysisrun -o jsonpath='{.items[-1:].metadata.name}')" \
+              | tail -30
+            echo '```'
+            echo "### 回滚事件"
+            echo '```'
+            kubectl -n "${NAMESPACE}" describe rollout order-demo-api | grep -iE 'abort|degrad|rollback' || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ================================================================
+      # 收尾
+      # ================================================================
+
+      - name: 汇总集群最终状态
+        if: always()
+        run: |
+          {
+            echo ""
+            echo "## 集群最终状态"
+            echo '```'
+            kubectl -n "${NAMESPACE}" get rollout,rs,pods,svc,analysisrun -o wide 2>&1 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 失败时导出诊断信息
+        if: failure()
+        run: |
+          echo "=== Rollout ==="
+          kubectl -n "${NAMESPACE}" describe rollout order-demo-api 2>&1 | tail -60 || true
+          echo "=== Pods ==="
+          kubectl -n "${NAMESPACE}" describe pods 2>&1 | tail -80 || true
+          echo "=== AnalysisRun ==="
+          kubectl -n "${NAMESPACE}" describe analysisrun 2>&1 | tail -60 || true
+          echo "=== Argo Rollouts controller 日志 ==="
+          kubectl -n argo-rollouts logs deployment/argo-rollouts --tail=80 || true

@@ -1,0 +1,135 @@
+# ------------------------------------------------------------------
+# 【重要】这是演示用的 PostgreSQL，不是生产可用的数据库部署。
+#
+# 单副本、无流复制、无备份、无 PITR、密码来自 Secret 占位。
+# 生产环境应当：
+#   - 用云托管数据库（RDS / 阿里云 RDS / Aurora），把高可用、备份、
+#     补丁、监控这些责任交给云厂商 —— 自建数据库的运维成本远高于托管费用
+#   - 或在集群内用 Operator（CloudNativePG / Zalando Postgres Operator），
+#     由 Operator 管理主从切换、备份、故障恢复
+#
+# 这里手写一个单副本 Deployment 的目的是让 demo 能在任意 kind 集群里
+# 一条命令跑起来，不依赖任何 Operator。
+# 面试时这里要能说清「为什么 demo 这么做」以及「生产会怎么做」。
+# ------------------------------------------------------------------
+apiVersion: v1
+kind: Secret
+metadata:
+  name: order-demo-postgres-secret
+  labels:
+    app.kubernetes.io/name: order-demo-postgres
+type: Opaque
+stringData:
+  POSTGRES_DB: orders
+  POSTGRES_USER: orders
+  POSTGRES_PASSWORD: CHANGE_ME_demo_only
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: order-demo-postgres
+  labels:
+    app.kubernetes.io/name: order-demo-postgres
+    app.kubernetes.io/component: database
+spec:
+  type: ClusterIP
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+  selector:
+    app.kubernetes.io/name: order-demo-postgres
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-demo-postgres
+  labels:
+    app.kubernetes.io/name: order-demo-postgres
+    app.kubernetes.io/component: database
+spec:
+  replicas: 1
+  # Recreate 而不是 RollingUpdate：RWO 卷不能被两个 Pod 同时挂载，
+  # RollingUpdate 会让新 Pod 卡在 ContainerCreating 等旧 Pod 释放卷。
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: order-demo-postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: order-demo-postgres
+        app.kubernetes.io/component: database
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999          # postgres 官方镜像里的 postgres 用户 uid
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+          ports:
+            - name: postgres
+              containerPort: 5432
+          envFrom:
+            - secretRef:
+                name: order-demo-postgres-secret
+          # PGDATA 指到子目录是官方镜像的要求：
+          # 直接挂载到 /var/lib/postgresql/data 时，挂载点下的 lost+found
+          # 会让 initdb 认为目录非空而拒绝初始化。
+          env:
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: run
+              mountPath: /var/run/postgresql
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U $POSTGRES_USER -d $POSTGRES_DB"]
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U $POSTGRES_USER -d $POSTGRES_DB"]
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: order-demo-postgres-data
+        - name: run
+          emptyDir: {}
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: order-demo-postgres-data
+  labels:
+    app.kubernetes.io/name: order-demo-postgres
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi

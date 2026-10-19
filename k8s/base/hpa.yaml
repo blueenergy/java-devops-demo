@@ -1,0 +1,57 @@
+# 水平自动扩缩容。
+#
+# scaleTargetRef 指向 Rollout 而不是 Deployment —— Argo Rollouts 支持被 HPA 直接伸缩。
+#
+# 关于用 CPU 作为扩缩容信号的局限（面试高频追问）：
+#   CPU 是「资源指标」，它滞后于真实压力。等 CPU 上来了，用户已经开始排队了。
+#   而且 Java 应用的 CPU 与吞吐不是线性关系 —— JIT 预热后同样请求量下 CPU 会下降，
+#   可能导致 HPA 误判为「压力减轻」而缩容，缩容后 CPU 又上来，形成抖动。
+#
+#   更贴近业务的做法是用「自定义指标」扩缩容，例如：
+#     - 请求队列深度
+#     - P99 延迟
+#     - 每秒订单创建数
+#   这需要 Prometheus Adapter 把 Prometheus 指标暴露成 k8s 的 custom metrics API。
+#   本 demo 没有部署 Adapter（它依赖一整套 Prometheus Operator），
+#   所以先用 CPU，并把这条局限写在这里 —— 知道工具边界比会用工具更重要。
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: order-demo-api
+  labels:
+    app.kubernetes.io/name: order-demo-api
+    app.kubernetes.io/component: backend
+spec:
+  scaleTargetRef:
+    apiVersion: argoproj.io/v1alpha1
+    kind: Rollout
+    name: order-demo-api
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          # 目标 70% 而不是 90%：留出余量应对突发流量。
+          # 设太高会导致扩容触发时已经接近饱和，扩容又需要 30-60 秒（拉镜像 + JVM 启动），
+          # 这段时间用户是在排队的。
+          averageUtilization: 70
+  behavior:
+    scaleUp:
+      # 扩容要快：15 秒窗口，一次最多翻倍
+      stabilizationWindowSeconds: 15
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 15
+    scaleDown:
+      # 缩容要慢：5 分钟稳定窗口。
+      # 这是防抖动的关键 —— 流量尖峰过去后不要立刻缩，
+      # 否则下一个尖峰又要重新扩容，而 JVM 冷启动期间性能最差。
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60

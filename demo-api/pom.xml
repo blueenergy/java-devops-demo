@@ -1,0 +1,147 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>io.github.blueenergy.demo</groupId>
+    <artifactId>order-demo-parent</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>demo-api</artifactId>
+  <name>demo-api</name>
+  <description>接入层：HTTP 控制器、全局异常处理、可观测性配置。可执行 jar 的落点。</description>
+
+  <dependencies>
+    <dependency>
+      <groupId>io.github.blueenergy.demo</groupId>
+      <artifactId>demo-core</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+
+    <!-- 校验实现（hibernate-validator）。demo-common 只带了 API。 -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-validation</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-actuator</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>io.micrometer</groupId>
+      <artifactId>micrometer-registry-prometheus</artifactId>
+    </dependency>
+
+    <!-- ===== 测试 ===== -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+
+    <!-- @ServiceConnection：自动把 Testcontainers 容器的连接信息配进 DataSource，免写 @DynamicPropertySource -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-testcontainers</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>postgresql</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+        <!--
+          executions 必须显式声明，这是本项目最贵的教训之一。
+
+          直觉上「声明了这个插件，repackage 就会在 package 阶段跑」——
+          对继承 spring-boot-starter-parent 的项目成立，但那个绑定不是插件自带的，
+          而是 starter-parent 的 pluginManagement 里声明的 execution。
+          我们选择自定义父 POM 后，这份绑定跟着丢了，构建却完全不报错：
+
+            --- jar:3.5.0:jar (default-jar) @ demo-api ---   ← 只打瘦 jar
+            （然后就没有然后了，没有 repackage 这一行）
+
+          后果链条：target 里没有 -exec.jar → Dockerfile 的 COPY 匹配不到
+          → 镜像里 /app 是空的 → 容器启动报 "Unable to access jarfile /app/app.jar"。
+          构建、测试、推送每一步都绿，死在运行期 —— 这类故障最难排查。
+
+          goals 不写 phase，Maven 用 goal 自身的默认 phase（package）。
+        -->
+        <executions>
+          <execution>
+            <id>repackage</id>
+            <goals>
+              <goal>repackage</goal>
+            </goals>
+          </execution>
+        </executions>
+        <configuration>
+          <!--
+            classifier=exec 至关重要。
+            不加它，repackage 会把「主 artifact」替换成 fat jar，类被塞进 BOOT-INF/classes。
+            后果有两个：
+              1) demo-coverage 的 report-aggregate 扫不到这些类 → 聚合报告为空
+              2) 其它模块若依赖本模块，拿到的是不可用的 fat jar
+            加了之后：主 artifact 是普通瘦 jar（供依赖与覆盖率扫描），
+            fat jar 变成 demo-api-1.0.0-SNAPSHOT-exec.jar（Dockerfile 用这个）。
+          -->
+          <classifier>exec</classifier>
+          <mainClass>io.github.blueenergy.demo.api.OrderDemoApplication</mainClass>
+        </configuration>
+      </plugin>
+
+      <plugin>
+        <groupId>io.github.git-commit-id</groupId>
+        <artifactId>git-commit-id-maven-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>get-git-info</id>
+            <goals>
+              <goal>revision</goal>
+            </goals>
+          </execution>
+        </executions>
+        <configuration>
+          <!--
+            默认值是 true。Docker 构建上下文里没有 .git，
+            不改这个开关，docker build 会在这一步直接 BUILD FAILURE。
+          -->
+          <failOnNoGitDirectory>false</failOnNoGitDirectory>
+          <failOnUnableToExtractRepoInfo>false</failOnUnableToExtractRepoInfo>
+          <generateGitPropertiesFile>true</generateGitPropertiesFile>
+          <generateGitPropertiesFilename>${project.build.outputDirectory}/git.properties</generateGitPropertiesFilename>
+          <includeOnlyProperties>
+            <includeOnlyProperty>^git.branch$</includeOnlyProperty>
+            <includeOnlyProperty>^git.commit.id$</includeOnlyProperty>
+            <includeOnlyProperty>^git.commit.id.abbrev$</includeOnlyProperty>
+            <includeOnlyProperty>^git.commit.time$</includeOnlyProperty>
+            <includeOnlyProperty>^git.build.time$</includeOnlyProperty>
+            <includeOnlyProperty>^git.commit.message.short$</includeOnlyProperty>
+          </includeOnlyProperties>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+</project>

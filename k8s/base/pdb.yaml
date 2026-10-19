@@ -1,0 +1,25 @@
+# PodDisruptionBudget 保护「自愿中断」场景下的可用性。
+#
+# 自愿中断包括：节点排水（kubectl drain）、集群升级、节点池缩容。
+# 这些操作会主动驱逐 Pod，而 PDB 保证驱逐过程中至少还有 minAvailable 个 Pod 在跑。
+#
+# 注意它【不】保护非自愿中断 —— 节点宕机、OOMKilled、内核 panic 这些
+# 不受 PDB 约束。所以 PDB 是「锦上添花」而不是「高可用保证」，
+# 真正的高可用来自多副本 + 反亲和 + 多可用区。
+#
+# minAvailable: 2 与 replicas: 3 的搭配：
+#   允许同时只有 1 个 Pod 不可用。集群升级时驱逐会被阻塞直到有 Pod 恢复，
+#   这是刻意的 —— 宁可升级慢，不可服务降级。
+#   如果设置成 minAvailable: 1，升级会快很多，但任何时刻都可能只剩 1 个 Pod 扛流量。
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: order-demo-api
+  labels:
+    app.kubernetes.io/name: order-demo-api
+    app.kubernetes.io/component: backend
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: order-demo-api

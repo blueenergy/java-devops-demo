@@ -1,0 +1,304 @@
+name: CI
+
+# 触发策略：
+#   push 到 main    —— 主干必须始终可发布
+#   PR 到 main      —— 合并前拦截
+#   tag v*          —— 发布版本，产出带语义化版本号的镜像
+#   workflow_dispatch —— 手动重跑，排查 flaky 测试时用
+on:
+  push:
+    branches: [main]
+    tags: ['v*.*.*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# 同一分支的新提交会取消上一次仍在跑的流水线。
+# 不配这个的话，连续推送 3 次会同时跑 3 条流水线，
+# 既浪费额度，也让「最新一次到底绿没绿」变得难以判断。
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# 默认最小权限，各 job 按需提权。
+# 顶层给 write 是常见的过度授权 —— 一旦某个第三方 action 被投毒，
+# 它能拿到的权限就是整个仓库的写权限。
+permissions:
+  contents: read
+
+env:
+  JAVA_VERSION: '21'
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/demo-api
+
+jobs:
+
+  # ==================================================================
+  # Job 1：构建、测试、覆盖率门禁
+  # ==================================================================
+  build-test:
+    name: 构建与测试
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      checks: write          # dorny/test-reporter 写 check run 需要
+      pull-requests: write   # PR 上评论测试结果需要
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v7
+
+      - name: 配置 JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          # 只用 setup-java 自带的缓存，不要再手写 actions/cache 缓存 ~/.m2/repository。
+          # 两者指向同一路径，同时启用会互相覆盖，偶发 restore 失败 ——
+          # 表现为「有时候构建特别慢」这种难以复现的问题。
+          cache: maven
+
+      # mvn verify 一次性完成：
+      #   compile → 单测（Surefire）→ 打包 → 集成测试（Failsafe，起 Testcontainers）
+      #   → JaCoCo 采集与聚合报告
+      #
+      # GitHub 的 ubuntu runner 自带 Docker，Testcontainers 能直接起 PostgreSQL，
+      # 不需要任何额外配置。这也是选 GitHub Actions 而不是自建 runner 的原因之一。
+      - name: 运行单元测试与集成测试
+        run: ./mvnw -B -ntp verify
+
+      # 覆盖率门禁单独一步，而不是塞进 mvn verify。
+      # 好处：失败时在 Actions 页面上能一眼看出是「测试挂了」还是「覆盖率不达标」，
+      # 两者的处理方式完全不同 —— 前者要修代码，后者通常要补测试。
+      - name: 覆盖率门禁
+        run: |
+          python3 scripts/check-coverage.py \
+            demo-coverage/target/site/jacoco-aggregate/jacoco.xml \
+            --min-line 0.80 \
+            --min-branch 0.70 \
+            --min-module-line 0.60
+
+      # 把测试结果渲染成 Actions 页面上的可读列表。
+      # if: always() 是关键 —— 测试失败时这一步才最需要执行，
+      # 不加的话失败路径下它会被跳过，恰恰看不到失败详情。
+      - name: 发布测试报告
+        uses: dorny/test-reporter@v3
+        if: always()
+        with:
+          name: 测试结果
+          # glob 必须同时覆盖两个目录：
+          #   surefire-reports —— 单元测试
+          #   failsafe-reports —— 集成测试
+          # 只写 surefire 是常见的疏漏，结果是集成测试的失败在报告里完全看不到。
+          path: |
+            **/target/surefire-reports/TEST-*.xml
+            **/target/failsafe-reports/TEST-*.xml
+          reporter: java-junit
+          fail-on-error: false
+
+      - name: 上传测试与覆盖率报告
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: test-and-coverage-reports
+          path: |
+            **/target/surefire-reports/
+            **/target/failsafe-reports/
+            demo-coverage/target/site/jacoco-aggregate/
+          retention-days: 7
+          if-no-files-found: warn
+
+  # ==================================================================
+  # Job 2：依赖漏洞扫描
+  # ==================================================================
+  dependency-scan:
+    name: 依赖漏洞扫描
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v7
+
+      # 扫描 pom.xml 解析出的全部传递依赖。
+      #
+      # 为什么用 format: table 而不是 sarif：
+      #   sarif 需要上传到 GitHub Security 页签，私有仓库要开 GitHub Advanced Security
+      #   （额外付费）。table + exit-code 是确定性门禁，在任何仓库类型下行为一致。
+      #   公开仓库可以改用 sarif 获得更好的可视化，但要加 security-events: write 权限。
+      #
+      # ignore-unfixed: true 的含义：只对「已有修复版本」的漏洞失败。
+      #   不过滤的话，一个尚未发布补丁的 CVE 会永久卡住流水线，
+      #   团队最后只能选择关闭扫描 —— 门禁设计要考虑「会不会被绕过」。
+      - name: Trivy 依赖扫描
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln
+          format: table
+          exit-code: '1'
+          severity: 'CRITICAL,HIGH'
+          ignore-unfixed: true
+
+  # ==================================================================
+  # Job 3：K8s manifests 校验
+  # ==================================================================
+  manifest-validation:
+    name: K8s 清单校验
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v7
+
+      # 先做跨资源引用检查（不需要网络，秒级完成）。
+      # 这类错误 schema 校验查不出来：每个资源单看都合法，
+      # 但 Service 选不中 Pod、探针指向不存在的健康分组。
+      - name: 跨资源引用一致性检查
+        run: python3 scripts/check-k8s-manifests.py
+
+      # 再做 schema 校验。
+      #
+      # 两个参数值得说明：
+      #
+      # -ignore-missing-schemas 是必须的。Argo Rollouts 的 Rollout 与
+      #   AnalysisTemplate 是 CRD，kubeconform 的内置 schema 里没有，
+      #   不加这个参数会把它们当成校验失败（而不是「跳过」）。
+      #
+      # -schema-location 给了两个源，kubeconform 按顺序尝试、前者失败回退后者。
+      #   默认源是 raw.githubusercontent.com，在部分网络环境下会被重置
+      #   （国内自建 runner 就会遇到），jsdelivr 的 fastly 节点可达性更好。
+      #   两个源指向同一份 schema 仓库，内容一致。
+      - name: kubeconform schema 校验
+        run: |
+          docker run --rm -v "$PWD/k8s:/m:ro" ghcr.io/yannh/kubeconform:v0.8.0 \
+            -strict -summary -ignore-missing-schemas \
+            -kubernetes-version 1.31.0 \
+            -schema-location 'https://fastly.jsdelivr.net/gh/yannh/kubernetes-json-schema@master/{{.NormalizedKubernetesVersion}}-standalone{{.StrictSuffix}}/{{.ResourceKind}}{{.KindSuffix}}.json' \
+            -schema-location default \
+            /m/base /m/rollout
+
+  # ==================================================================
+  # Job 4：构建并推送镜像
+  # ==================================================================
+  docker:
+    name: 构建并推送镜像
+    needs: [build-test, dependency-scan, manifest-validation]
+    # PR 上不推送镜像：PR 的代码还没合并，推上去会污染镜像仓库的 tag 空间。
+    # 但 PR 仍然需要验证「Dockerfile 能不能构建成功」，所以下面用 push: false 跑一次。
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v7
+
+      - name: 配置 Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: 登录 GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          # GITHUB_TOKEN 是每个 workflow 自动获得的临时令牌，
+          # 不需要在仓库里配置任何长期凭证 —— 这也是「不用明文密钥」的一种体现。
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 生成镜像标签与元数据
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=long,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: 构建并推送
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # GHA 层缓存。注意它缓存的是【镜像层】，不包含 Dockerfile 里
+          # --mount=type=cache 的目录 —— 所以每次构建仍会重新下载 Maven 依赖。
+          # 这是「多阶段 Dockerfile 自包含构建」这个选择的固有代价。
+          # 替代方案（CI 里先 mvn package，Dockerfile 只做组装）见 docs/03-docker.md。
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+          # ------------------------------------------------------------------
+          # 供应链安全三元组，银行/金融场景的审计重点。
+          #
+          # provenance（来源证明）：记录镜像是「用哪个 Dockerfile、从哪个 Git commit、
+          #   在哪个构建器上」产出的。SLSA 分级里属于 Level 3 的能力。
+          # sbom（软件物料清单）：列出镜像里所有软件包及版本，
+          #   用于 CVE 爆发时快速回答「我们哪些镜像受影响」——
+          #   没有 SBOM 时这个问题要靠人肉排查，可能要几天。
+          # ------------------------------------------------------------------
+          provenance: true
+          sbom: true
+
+      - name: 输出镜像摘要
+        run: |
+          echo "### 镜像构建完成" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| 项 | 值 |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| 版本 | \`${{ steps.meta.outputs.version }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Digest | \`${{ steps.build.outputs.digest }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "生产部署应使用上面的 digest 而不是 tag —— tag 可变，digest 不可变。" >> $GITHUB_STEP_SUMMARY
+
+  # ==================================================================
+  # Job 5：镜像漏洞扫描
+  # ==================================================================
+  image-scan:
+    name: 镜像漏洞扫描
+    needs: [docker]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: 登录 GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 扫描最终镜像，而不只是依赖清单。
+      # 两者互补：依赖扫描看 pom.xml 里的库，镜像扫描还覆盖
+      # 基础镜像（eclipse-temurin:21-jre-alpine）里的 OS 包 ——
+      # 很多高危 CVE 来自 openssl、zlib 这类系统库，依赖扫描完全看不到。
+      - name: Trivy 镜像扫描
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ needs.docker.outputs.digest }}
+          format: table
+          exit-code: '1'
+          severity: 'CRITICAL,HIGH'
+          ignore-unfixed: true
+          scanners: vuln

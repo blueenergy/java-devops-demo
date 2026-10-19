@@ -1,0 +1,115 @@
+# 金丝雀分析的【加分项】—— 基于 Prometheus 指标判定。
+#
+# ==========================================================================
+# 使用前提（不满足的话这个分析会一直判 Inconclusive 直到超时）
+# ==========================================================================
+#
+# 1. 集群里必须有 Prometheus，且能通过 ServiceMonitor 抓到本应用的指标。
+#    没有的话查询返回空，AnalysisRun 判 Inconclusive，Rollout 卡在
+#    Progressing 直到 progressDeadlineSeconds 超时 —— 看起来像「回滚了」，
+#    实际是探测根本没拿到数据。这也是主路径改用 Job 探测的原因。
+#
+# 2. 金丝雀期间必须有【真实流量】打到 canary 版本。
+#    错误率是 sum(5xx) / sum(all)，分母为 0 时 PromQL 返回空集。
+#    本地 kind 集群没有真实流量，所以这份模板只在有压测工具
+#    （如 k6、vegeta）或接了真实 Ingress 流量时才有意义。
+#
+# 3. 必须有足够长的观察窗口。interval × count 决定了分析时长，
+#    而 rate() 的窗口（这里是 2m）决定了需要多少历史数据。
+#    窗口太短会取到不稳定的值，导致判定抖动。
+#
+# 结论：这份模板在真实生产环境（有流量、有 Prometheus）才是主路径，
+#       在演示环境里跑不出有效结论。知道「什么条件下这个工具才有意义」
+#       比「会写这段 YAML」重要得多。
+# ==========================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: order-demo-api-prometheus
+  labels:
+    app.kubernetes.io/name: order-demo-api
+    app.kubernetes.io/part-of: order-demo
+spec:
+  args:
+    - name: service-name
+      value: order-demo-api-canary
+    - name: prometheus-url
+      value: http://prometheus-operated.monitoring.svc.cluster.local:9090
+  metrics:
+    # ------------------------------------------------------------------
+    # 指标 1：5xx 错误率
+    # ------------------------------------------------------------------
+    - name: error-rate
+      interval: 30s
+      count: 5
+      # 连续 2 次不达标就中止。对应 1 分钟的持续故障。
+      failureLimit: 2
+      # 关键：显式声明 Inconclusive 时怎么办。
+      # 默认行为是「不算失败」，于是探测拿不到数据时会一直等到超时。
+      # 生产环境通常希望「拿不到数据 = 不能确认安全 = 中止发布」，
+      # 但那样 Prometheus 自身抖动会导致误回滚。
+      # 这里的取舍：允许 Inconclusive，但配合下面的 minimum 条件避免空集误判。
+      inconclusiveLimit: 3
+      # 少于 10 个请求样本时判定为 Inconclusive，而不是当成 0% 错误率。
+      # 少了这一条，低流量时段「1 个请求恰好成功」会被判成 100% 成功率。
+      minIqr: 0
+      successCondition: len(result) == 0 || result[0] < 0.05
+      provider:
+        prometheus:
+          address: "{{args.prometheus-url}}"
+          query: |
+            sum(rate(http_server_requests_seconds_count{
+              application="order-demo-api",
+              kubernetes_service="{{args.service-name}}",
+              status=~"5.."
+            }[2m]))
+            /
+            clamp_min(sum(rate(http_server_requests_seconds_count{
+              application="order-demo-api",
+              kubernetes_service="{{args.service-name}}"
+            }[2m])), 0.001)
+
+    # ------------------------------------------------------------------
+    # 指标 2：P99 延迟
+    # ------------------------------------------------------------------
+    # 需要 application.yml 里打开 percentiles-histogram，
+    # 否则没有 _bucket 序列，histogram_quantile() 返回空 ——
+    # 而空结果不会让分析失败，只会让它一直 Inconclusive。
+    # 这就是「告警规则静默失效」的典型成因。
+    - name: latency-p99
+      interval: 30s
+      count: 5
+      failureLimit: 2
+      inconclusiveLimit: 3
+      successCondition: len(result) == 0 || result[0] < 1.0
+      provider:
+        prometheus:
+          address: "{{args.prometheus-url}}"
+          query: |
+            histogram_quantile(
+              0.99,
+              sum(rate(http_server_requests_seconds_bucket{
+                application="order-demo-api",
+                kubernetes_service="{{args.service-name}}"
+              }[2m])) by (le)
+            )
+
+    # ------------------------------------------------------------------
+    # 指标 3：金丝雀实例是否真的在提供服务
+    # ------------------------------------------------------------------
+    # 防「假绿」：新版本可能因为配置错误而完全不接流量，
+    # 此时错误率是 0、延迟是 0，前两个指标都会通过 ——
+    # 但服务实际上已经死了。必须有正向的流量指标兜底。
+    - name: traffic-present
+      interval: 30s
+      count: 3
+      failureLimit: 1
+      successCondition: result[0] > 0
+      provider:
+        prometheus:
+          address: "{{args.prometheus-url}}"
+          query: |
+            sum(rate(http_server_requests_seconds_count{
+              application="order-demo-api",
+              kubernetes_service="{{args.service-name}}"
+            }[2m]))

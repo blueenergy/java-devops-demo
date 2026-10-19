@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>io.github.blueenergy.demo</groupId>
+    <artifactId>order-demo-parent</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>demo-common</artifactId>
+  <name>demo-common</name>
+  <description>对外契约：请求/响应 DTO、错误码、业务异常。刻意不依赖 Spring Web。</description>
+
+  <dependencies>
+    <!--
+      只要校验注解（@NotNull/@Positive 等），不要 hibernate-validator 实现。
+      API 与实现分离：实现由 demo-api 通过 spring-boot-starter-validation 提供。
+    -->
+    <dependency>
+      <groupId>jakarta.validation</groupId>
+      <artifactId>jakarta.validation-api</artifactId>
+    </dependency>
+
+    <!--
+      只要序列化注解（@JsonInclude 等），不要 databind、不要 ObjectMapper。
+      契约 DTO 上标注解是常规做法，且注解库无传递依赖、无运行时代码，
+      不会破坏「demo-common 保持框架无关」这条约束。
+    -->
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-annotations</artifactId>
+    </dependency>
+
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+</project>

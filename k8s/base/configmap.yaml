@@ -1,0 +1,35 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: order-demo-api-config
+  labels:
+    app.kubernetes.io/name: order-demo-api
+    app.kubernetes.io/component: backend
+data:
+  # 非敏感配置放 ConfigMap。敏感值放 Secret（见 secret.yaml）。
+  # 判断标准：这条配置泄漏出去会不会造成损失？
+  # 数据库地址泄漏通常可接受，密码泄漏不行。
+  DB_URL: "jdbc:postgresql://order-demo-postgres:5432/orders"
+  DB_POOL_MAX_SIZE: "10"
+  LOG_LEVEL: "INFO"
+  SERVER_PORT: "8080"
+
+  # ------------------------------------------------------------------
+  # 故障注入开关 —— 演示金丝雀自动回滚的道具。
+  #
+  # 演示步骤：
+  #   1. 保持 enabled=false，发布 v2 → 金丝雀分析通过 → 逐步放量到 100%
+  #   2. 把 enabled 改成 "true"、FAULT_ERROR_RATE 改成 "0.5"，发布 v3
+  #      → Pod 正常就绪（注入刻意绕开 /actuator/**）
+  #      → 金丝雀分析打到业务接口拿到 500 → 分析失败 → 自动回滚到 v2
+  #
+  # 第 2 步的日志里能看到 AnalysisRun 状态为 Failed，
+  # 以及 Rollout 事件 "RolloutAborted: Rollout aborted update to revision N"。
+  # 这就是面试时要展示的那条证据。
+  #
+  # 生产环境不应该存在这两个键 —— 真实系统用 Chaos Mesh 之类的平台
+  # 在基础设施层做故障演练，而不是把开关编进业务进程。
+  # ------------------------------------------------------------------
+  FAULT_ENABLED: "false"
+  FAULT_ERROR_RATE: "0.0"
+  FAULT_LATENCY_MS: "0"

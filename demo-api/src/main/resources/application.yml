@@ -1,0 +1,139 @@
+spring:
+  application:
+    name: order-demo-api
+
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/orders}
+    username: ${DB_USERNAME:orders}
+    password: ${DB_PASSWORD:orders}
+    hikari:
+      # 连接池上限要和数据库的 max_connections、以及 Pod 副本数一起算。
+      # 3 副本 × 10 = 30 条连接，默认的 10 在副本数上去之后会打爆数据库。
+      maximum-pool-size: ${DB_POOL_MAX_SIZE:10}
+      minimum-idle: ${DB_POOL_MIN_IDLE:2}
+      connection-timeout: 3000
+      # 验证连接存活，避免拿到已被数据库单方面关闭的死连接
+      validation-timeout: 2000
+
+  jpa:
+    # schema 由 Flyway 管理，Hibernate 只做校验。
+    # 用 update/create 会让 Hibernate 按实体推断 DDL，与迁移脚本产生分歧，
+    # 最终没人知道线上表结构到底长什么样。validate 会在不一致时直接启动失败。
+    hibernate:
+      ddl-auto: validate
+    # 关掉 Open Session in View：默认开启会让数据库连接一直持有到响应渲染完成，
+    # 高并发下连接池被白白占满。关掉后懒加载必须在事务内完成 —— 这是好事，
+    # 它逼你把查询边界想清楚，而不是让 N+1 查询藏在视图渲染里。
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+          batch_size: 50
+        order_inserts: true
+        order_updates: true
+
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: false
+    validate-on-migrate: true
+
+  # 优雅停机：收到 SIGTERM 后先停止接收新请求，等在途请求处理完再退出。
+  # 配合 k8s 的 preStop hook 使用，见 k8s/base/rollout.yaml。
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
+
+server:
+  port: ${SERVER_PORT:8080}
+  shutdown: graceful
+  # 让 Tomcat 在停止接收新连接后，给在途请求留出处理时间
+  tomcat:
+    threads:
+      max: ${SERVER_TOMCAT_MAX_THREADS:200}
+
+management:
+  # ------------------------------------------------------------------
+  # 显式开启 Prometheus 导出。
+  #
+  # 这一行不能省。虽然 Boot 的配置元数据里
+  # management.prometheus.metrics.export.enabled 标称默认 true，
+  # 但实际运行时 PrometheusMetricsExportAutoConfiguration 的条件判定会失败
+  # （`--debug` 的条件评估报告里能看到
+  #   @ConditionalOnEnabledMetricsExport management.defaults.metrics.export.enabled
+  #   is considered false）。
+  # 后果非常隐蔽：/actuator/health 正常、应用启动无任何报错，
+  # 但 /actuator/prometheus 根本没注册，请求落到静态资源处理器并返回 500。
+  # 监控面板全空、告警规则永不触发，而服务看起来完全健康。
+  #
+  # 排查路径：启动时加 --debug 看 CONDITIONS EVALUATION REPORT，
+  # 搜 PrometheusMetricsExportAutoConfiguration 即可看到是哪个条件没过。
+  # ------------------------------------------------------------------
+  prometheus:
+    metrics:
+      export:
+        enabled: true
+
+  endpoints:
+    web:
+      exposure:
+        # 只暴露必要的端点。默认暴露全部会泄漏配置、环境变量、Bean 列表。
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      # 演示用 always，方便直接看到 db 等组件的状态。
+      # 生产建议改 when-authorized，否则健康详情会成为信息泄漏面。
+      show-details: always
+      probes:
+        enabled: true
+      group:
+        # liveness 只反映「进程是否还活着、是否需要重启」。
+        # 绝对不能把 db 放进 liveness：数据库抖动几分钟，
+        # 所有 Pod 会被判定为不健康并集体重启，把一次数据库故障放大成一次全站故障。
+        liveness:
+          include: livenessState,ping
+        # readiness 反映「现在能不能接流量」，所以必须包含下游依赖。
+        # 数据库不可用时 Pod 从 Endpoints 摘除，流量转到健康副本，但不重启。
+        readiness:
+          include: readinessState,db
+  info:
+    env:
+      enabled: true
+  metrics:
+    tags:
+      # 给所有指标打上应用标签，多服务共用一套 Prometheus 时用来区分
+      application: ${spring.application.name}
+    distribution:
+      percentiles-histogram:
+        # 打开直方图，Prometheus 才能算 p95/p99（而不是只能算平均值）
+        http.server.requests: true
+        order.process: true
+
+# 这些占位符由 maven-resources-plugin 在构建时替换（定界符是 @ 而不是 ${}）。
+#
+# 值必须加引号。原因：YAML 规范里 @ 是保留字符，不能作为 token 的起始字符。
+# 不加引号时源文件不是合法 YAML —— 运行期没问题（Maven 过滤先把它替换掉了），
+# 但编辑器会标红、任何 YAML linter 都会失败、IDE 的配置提示也全部失效。
+# 加引号后源文件与过滤后的产物都是合法 YAML，两边都不损失。
+#
+# 若在 /actuator/info 里看到字面量 project.version 占位符没被替换，
+# 说明父 POM 的 maven-resources-plugin <delimiter> 配置丢了。
+info:
+  app:
+    name: "@project.name@"
+    version: "@project.version@"
+    description: "@project.description@"
+
+app:
+  fault:
+    enabled: ${FAULT_ENABLED:false}
+    error-rate: ${FAULT_ERROR_RATE:0.0}
+    latency-ms: ${FAULT_LATENCY_MS:0}
+
+logging:
+  level:
+    root: INFO
+    io.github.blueenergy.demo: ${LOG_LEVEL:INFO}
+  pattern:
+    # 输出 traceId/spanId 占位，接入链路追踪后无需改配置
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [${spring.application.name:},%X{traceId:-},%X{spanId:-}] %logger{36} - %msg%n"

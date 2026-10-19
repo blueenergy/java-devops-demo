@@ -1,0 +1,192 @@
+# Argo Rollouts 的 Rollout 资源，替代原生 Deployment 来获得金丝雀能力。
+#
+# 为什么不用原生 Deployment：
+#   原生 Deployment 的 strategy 只支持 RollingUpdate 与 Recreate。
+#   RollingUpdate 会立刻把新版本铺到所有副本，没有「先放 20% 流量观察」这一步。
+#   Rollout 是 Deployment 的超集 —— 它同样管理 ReplicaSet，
+#   但支持分步放量、暂停、以及在每一步插入自动分析。
+#
+# 关于「权重」的一个重要事实（面试常被追问）：
+#   本配置没有配 trafficRouting（需要 Istio / Nginx Ingress / Gateway API 之一）。
+#   在没有流量路由器的情况下，Argo Rollouts 的 setWeight 无法真正按百分比切分流量，
+#   它只能按【副本数比例】近似 —— setWeight: 20 且 replicas: 3 时，
+#   实际是 1 个 canary 副本对 2 个 stable 副本，真实比例约 33% 而非 20%。
+#   生产环境要精确控流必须接入 trafficRouting。
+#   这里选择不接，是为了让 demo 不依赖特定的 Ingress 实现，能在任何 kind 集群里跑起来。
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: order-demo-api
+  labels:
+    app.kubernetes.io/name: order-demo-api
+    app.kubernetes.io/component: backend
+    app.kubernetes.io/part-of: order-demo
+spec:
+  replicas: 3
+  revisionHistoryLimit: 5
+
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: order-demo-api
+
+  strategy:
+    canary:
+      # Rollout 需要两个 Service：
+      #   stableService  —— 指向当前稳定版本的 Pod
+      #   canaryService  —— 指向金丝雀版本的 Pod，分析任务打这个
+      # 切换版本时 Argo 通过改这两个 Service 的 selector 来导流。
+      stableService: order-demo-api-stable
+      canaryService: order-demo-api-canary
+
+      # 下面这行是「自动回滚」的关键。不加它，金丝雀分析失败时
+      # Rollout 会停在 Degraded 状态等人处理，而不是自己退回上一版本。
+      # 银行场景下 MTTR 是核心指标，能自动回滚的就不该等人。
+      steps:
+        # 第 1 步：放 1 个副本出去（约 33%）
+        - setWeight: 20
+        # 停 30 秒，让新 Pod 有机会暴露问题。
+        # 太短会让分析跑在冷启动阶段，误判；太长会拖慢发布节奏。
+        - pause:
+            duration: 30s
+
+        # 第 2 步：对 canary Service 跑冒烟分析。
+        # 失败则整个 Rollout 中止并回滚到 stableService 指向的版本。
+        - analysis:
+            templates:
+              - templateName: order-demo-api-smoke
+            args:
+              - name: service-name
+                value: order-demo-api-canary
+
+        # 第 3 步：分析通过后放一半
+        - setWeight: 50
+        - pause:
+            duration: 30s
+
+        # 第 4 步：全量
+        - setWeight: 100
+
+      # 发布过程中不缩容旧版本，保证任何时刻都有完整容量的稳定版本兜底。
+      # 代价是发布期间资源占用翻倍，需要集群有足够余量。
+      # 集群紧张时改成 0，但那样回滚会变慢（要先扩容再切流量）。
+      scaleDownDelaySeconds: 30
+
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: order-demo-api
+        app.kubernetes.io/component: backend
+    spec:
+      serviceAccountName: order-demo-api
+
+      # 必须大于 spring.lifecycle.timeout-per-shutdown-phase（30s）。
+      # 小于它的话，k8s 会在应用还没处理完在途请求时就发 SIGKILL，
+      # 表现为滚动更新期间出现偶发 502。
+      terminationGracePeriodSeconds: 45
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: order-demo-api
+          # 镜像地址由 kustomize overlay 覆盖。
+          # 生产环境应当用 digest 而不是 tag 部署（见 overlays/prod/kustomization.yaml 的注释）：
+          # tag 是可变的，同一次部署在不同时间可能拉到不同内容，破坏可审计性。
+          image: order-demo-api:local
+
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+
+          envFrom:
+            - configMapRef:
+                name: order-demo-api-config
+            - secretRef:
+                name: order-demo-api-secret
+
+          # ------------------------------------------------------------------
+          # 三类探针各司其职，配错会引发连锁故障：
+          #
+          # startupProbe    —— 只管「启动完了没」。启动慢的应用必须有它，
+          #                    否则 liveness 会在启动期间就判定失败并不断重启，
+          #                    形成永远起不来的死循环。
+          # livenessProbe   —— 只管「进程是不是卡死了，需不需要重启」。
+          #                    绝对不能包含数据库等下游检查：数据库抖几分钟，
+          #                    所有 Pod 会被集体重启，把一次数据库故障放大成全站故障。
+          # readinessProbe  —— 只管「现在能不能接流量」。必须包含下游依赖，
+          #                    数据库不可用时把 Pod 从 Endpoints 摘除，但不重启。
+          # ------------------------------------------------------------------
+          startupProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+            periodSeconds: 5
+            failureThreshold: 24      # 最多容忍 120 秒启动时间
+            timeoutSeconds: 3
+
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 3
+
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: http
+            periodSeconds: 5
+            failureThreshold: 3
+            timeoutSeconds: 3
+
+          # ------------------------------------------------------------------
+          # preStop 是零停机滚动更新的最后一块拼图。
+          #
+          # Pod 被删除时，k8s 会【同时】做两件事：从 Service 的 Endpoints 摘除，
+          # 以及发送 SIGTERM。这两件事是并行的，而 kube-proxy 刷新 iptables 规则
+          # 需要时间。在这个窗口里，流量仍可能被转发到正在关闭的 Pod。
+          #
+          # sleep 让应用在收到 SIGTERM 前多等一会儿，等 Endpoints 变更传播完。
+          # 不配它，滚动更新期间几乎必然出现偶发 502。
+          # ------------------------------------------------------------------
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sh", "-c", "sleep 10"]
+
+          # requests 决定调度，limits 决定上限。
+          # 两者都设且相等时，Pod 会获得 Guaranteed QoS —— 最不容易被驱逐，
+          # 代价是失去突发能力。订单服务对延迟敏感、内存需求平稳，用 Guaranteed。
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 768Mi
+
+          # 只读根文件系统 + 丢弃全部 Linux capabilities。
+          # Java 应用不需要写根目录（临时文件走 /tmp），
+          # 也不需要在容器内提权。这是把攻击面压到最小的标准做法。
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+
+      volumes:
+        # readOnlyRootFilesystem 下 JVM 仍需要 /tmp 写临时文件，
+        # 用 emptyDir 提供一个可写的临时目录。
+        - name: tmp
+          emptyDir: {}

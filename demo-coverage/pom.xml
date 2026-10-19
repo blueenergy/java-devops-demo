@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>io.github.blueenergy.demo</groupId>
+    <artifactId>order-demo-parent</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>demo-coverage</artifactId>
+  <name>demo-coverage</name>
+  <description>只做一件事：把各模块的 jacoco.exec 合并成一份跨模块覆盖率报告。</description>
+
+  <!--
+    这个模块没有 src 目录，不产出任何代码，只产出报告。
+
+    三个硬性要求，缺一个就是空报告：
+      1) 必须显式依赖所有要统计的模块 —— report-aggregate 只扫「本模块 + 它的依赖」，
+         不会自动扫整个 reactor。
+      2) 必须是 reactor 里的最后一个 module（父 POM 的 <modules> 顺序已保证）。
+      3) 自己不能跑 prepare-agent（本模块没有测试）。
+  -->
+  <dependencies>
+    <dependency>
+      <groupId>io.github.blueenergy.demo</groupId>
+      <artifactId>demo-common</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>io.github.blueenergy.demo</groupId>
+      <artifactId>demo-core</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>io.github.blueenergy.demo</groupId>
+      <artifactId>demo-api</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.jacoco</groupId>
+        <artifactId>jacoco-maven-plugin</artifactId>
+        <executions>
+          <!--
+            父 POM 的 <build><plugins> 里声明了 jacoco，所有子模块都会继承 prepare-agent 与 report。
+            本模块不需要它们（没有测试可跑），用 <phase>none</phase> 把继承来的执行关掉。
+          -->
+          <execution>
+            <id>prepare-agent</id>
+            <phase>none</phase>
+          </execution>
+          <execution>
+            <id>report</id>
+            <phase>none</phase>
+          </execution>
+
+          <execution>
+            <id>report-aggregate</id>
+            <phase>verify</phase>
+            <goals>
+              <goal>report-aggregate</goal>
+            </goals>
+            <configuration>
+              <!-- 同时产出 XML 供 CI 卡阈值，HTML 供人看 -->
+              <dataFileIncludes>
+                <dataFileInclude>**/jacoco.exec</dataFileInclude>
+              </dataFileIncludes>
+              <outputDirectory>${project.reporting.outputDirectory}/jacoco-aggregate</outputDirectory>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

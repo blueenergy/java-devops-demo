@@ -1,0 +1,85 @@
+# CI 专用叠加层：给 GitHub Actions 里的 kind 集群用。
+#
+# 与 dev 的区别：
+#   1. 镜像用 kind load 预载的本地 tag，不推送到任何 registry
+#   2. 去掉 NetworkPolicy —— kind 默认的 kindnet CNI 不实现 NetworkPolicy，
+#      对象会被 API Server 接受但静默不生效。留着会造成
+#      「以为已经做了网络隔离」的错觉，不如显式去掉并说明原因。
+#   3. 单副本，kind 节点资源有限
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: order-demo
+
+resources:
+  - ../../base
+
+commonLabels:
+  env: ci
+
+# kind load docker-image 把镜像直接塞进节点，不需要 registry。
+# 用 :ci 这个 tag 与本地开发用的 :local 区分开。
+images:
+  - name: order-demo-api
+    newName: order-demo-api
+    newTag: ci
+
+replicas:
+  - name: order-demo-api
+    count: 1
+
+patches:
+  # kind 的 kindnet 不支持 NetworkPolicy，去掉避免误导
+  - target:
+      kind: NetworkPolicy
+    patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: unused
+
+  # 单副本下 PDB 的 minAvailable: 2 永远无法满足，
+  # 会让任何节点排水操作被无限阻塞
+  - target:
+      kind: PodDisruptionBudget
+      name: order-demo-api
+    patch: |-
+      $patch: delete
+      apiVersion: policy/v1
+      kind: PodDisruptionBudget
+      metadata:
+        name: order-demo-api
+
+  # 单副本不需要 HPA
+  - target:
+      kind: HorizontalPodAutoscaler
+      name: order-demo-api
+    patch: |-
+      $patch: delete
+      apiVersion: autoscaling/v2
+      kind: HorizontalPodAutoscaler
+      metadata:
+        name: order-demo-api
+
+  # kind 集群资源有限，调小配额避免调度失败
+  - target:
+      kind: Rollout
+      name: order-demo-api
+    patch: |-
+      apiVersion: argoproj.io/v1alpha1
+      kind: Rollout
+      metadata:
+        name: order-demo-api
+      spec:
+        template:
+          spec:
+            containers:
+              - name: order-demo-api
+                resources:
+                  requests:
+                    cpu: 100m
+                    memory: 384Mi
+                  limits:
+                    cpu: 500m
+                    memory: 640Mi

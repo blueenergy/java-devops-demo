@@ -1,0 +1,18 @@
+# 统一换行符，避免 Windows 检出时把 shell 脚本变成 CRLF 导致
+# "bad interpreter: /bin/bash^M" —— 这个错误在 WSL + Windows 双环境下极常见。
+* text=auto eol=lf
+
+# 这些文件必须保持原样，不能被换行符转换破坏
+*.jar   binary
+*.png   binary
+*.jpg   binary
+*.gif   binary
+*.ico   binary
+
+# mvnw 是 shell 脚本，必须 LF
+mvnw      text eol=lf
+mvnw.cmd  text eol=crlf
+
+# 锁文件与生成物在 diff 里折叠，避免 review 时被噪音淹没
+package-lock.json  linguist-generated=true
+*.lock             linguist-generated=true

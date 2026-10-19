@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: order-demo
+  labels:
+    app.kubernetes.io/part-of: order-demo
+    # Pod Security Admission 标签：enforce=restricted 会拒绝任何
+    # 不符合 restricted 标准的 Pod（特权容器、hostNetwork、root 用户等）。
+    #
+    # 这是「用平台能力强制安全基线」，而不是靠 code review 记住要写 securityContext。
+    # 人一定会忘，准入控制器不会。
+    #
+    # 从 baseline 开始而不是直接 restricted：restricted 要求
+    # runAsNonRoot + seccompProfile + 丢弃全部 capabilities + 只读根文件系统，
+    # 存量应用往往需要改造。用 warn 级别先暴露问题、再逐步收紧，
+    # 比一次性 enforce 导致所有部署失败更可行。
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/audit: restricted

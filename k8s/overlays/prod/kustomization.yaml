@@ -1,0 +1,94 @@
+# 生产环境叠加层。
+#
+# 与 dev 的关键差异：
+#   1. 按 digest 部署，不按 tag —— 可审计、可复现
+#   2. 副本数更多，资源配额更宽
+#   3. 保留 HPA 与 PDB
+#   4. 加上拓扑分布约束，避免所有副本落在同一个节点/可用区
+#   5. 启用 ServiceMonitor（假设集群装了 Prometheus Operator）
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: order-demo-prod
+
+resources:
+  - ../../base
+
+commonLabels:
+  env: prod
+
+# ------------------------------------------------------------------
+# 【重要】生产按 digest 部署，不按 tag。
+#
+# tag 是可变的：同一个 ghcr.io/.../demo-api:v1.2.3 在今天和下周
+# 可能指向完全不同的镜像内容。这破坏了两件事：
+#   - 可审计性：三个月后回查「当时上线的是哪份代码」，tag 给不出答案
+#   - 可回滚性：回滚到 v1.2.2 时拉到的可能已经不是当初那个 v1.2.2
+#
+# digest 是镜像内容的 SHA256，不可变。按 digest 部署意味着
+# 「部署了哪个版本」和「回滚到哪个版本」都有确定的答案 ——
+# 这在受监管行业（银行、证券）是审计的硬性要求。
+#
+# CI 在推送镜像后会把 digest 写回这里（见 .github/workflows/cd.yml 的
+# "Pin image digest" 步骤），或通过 kustomize edit set image 动态注入。
+# ------------------------------------------------------------------
+images:
+  - name: order-demo-api
+    newName: ghcr.io/blueenergy/java-devops-demo/demo-api
+    # 占位 digest，由 CI 在部署时替换为真实值。
+    # 用 digest 时 newTag 必须省略 —— 同时指定 tag 和 digest 会报错。
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+
+replicas:
+  - name: order-demo-api
+    count: 3
+
+patches:
+  # 拓扑分布：同一可用区最多 2 个副本，同一节点最多 1 个。
+  # 不做这个约束时，调度器可能把 3 个副本全放到一个节点上 ——
+  # 那个节点一挂，服务就整体不可用，多副本的意义荡然无存。
+  # whenUnsatisfiable: ScheduleAnyway 而不是 DoNotSchedule：
+  # 硬约束在节点数不足时会让 Pod 永远 Pending，软约束只影响调度偏好。
+  - target:
+      kind: Rollout
+      name: order-demo-api
+    patch: |-
+      apiVersion: argoproj.io/v1alpha1
+      kind: Rollout
+      metadata:
+        name: order-demo-api
+      spec:
+        template:
+          spec:
+            topologySpreadConstraints:
+              - maxSkew: 1
+                topologyKey: topology.kubernetes.io/zone
+                whenUnsatisfiable: ScheduleAnyway
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: order-demo-api
+              - maxSkew: 1
+                topologyKey: kubernetes.io/hostname
+                whenUnsatisfiable: ScheduleAnyway
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: order-demo-api
+            containers:
+              - name: order-demo-api
+                resources:
+                  requests:
+                    cpu: 500m
+                    memory: 768Mi
+                  limits:
+                    cpu: "2"
+                    memory: 1Gi
+
+configMapGenerator:
+  - name: order-demo-api-config
+    behavior: merge
+    literals:
+      - LOG_LEVEL=INFO
+      # 生产必须关闭故障注入。这是安全网：即便有人误操作改了 base，
+      # overlay 也会把它覆盖回来。
+      - FAULT_ENABLED=false
+      - FAULT_ERROR_RATE=0.0

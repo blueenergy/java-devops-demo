@@ -1,0 +1,44 @@
+# ServiceMonitor 是 Prometheus Operator 的 CRD，用来声明「抓取哪些服务」。
+#
+# 与 docker-compose 里那份 prometheus.yml 的区别：
+#   compose 用 static_configs 写死地址，因为容器名固定；
+#   k8s 里 Pod IP 随重建变化，必须靠服务发现。ServiceMonitor 就是
+#   「用标签选择器声明抓取目标」的声明式写法 —— 加一个带相同标签的服务，
+#   自动被纳入抓取，不需要改 Prometheus 配置。
+#
+# 前提：集群里装了 Prometheus Operator（kube-prometheus-stack）。
+# 没装的话这个 CRD 不存在，kubectl apply 会报
+# "no matches for kind ServiceMonitor"。CI 里的静态校验能提前发现这个问题，
+# 而 kubeconform 默认不认 CRD —— 所以校验命令要加 -ignore-missing-schemas
+# 或提供 CRD schema，见 .github/workflows/cd.yml。
+#
+# 一个高频踩坑点：
+#   kube-prometheus-stack 默认 serviceMonitorSelectorNilUsesHelmValues=true，
+#   它只会选中带有 helm release 标签的 ServiceMonitor。
+#   本对象没有那个标签，于是 Prometheus 根本不会加载它 ——
+#   指标抓不到，但 ServiceMonitor 对象看起来一切正常。
+#   排查方法：kubectl get prometheus -o yaml 看 serviceMonitorSelector，
+#   以及 Prometheus 的 /targets 页面是否为空。
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: order-demo-api
+  labels:
+    app.kubernetes.io/name: order-demo-api
+    app.kubernetes.io/component: backend
+    # 若集群的 Prometheus 用 helm release 标签做选择，按实际情况补上这一行：
+    # release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: order-demo-api
+  endpoints:
+    - port: http
+      path: /actuator/prometheus
+      interval: 15s
+      scrapeTimeout: 10s
+      # 抓取时带上环境标签，多环境共用一套 Prometheus 时用于区分
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_namespace]
+          targetLabel: namespace
+          action: replace

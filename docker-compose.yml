@@ -1,0 +1,118 @@
+# 本地一键起完整环境：应用 + PostgreSQL + Prometheus + Grafana。
+#
+#   docker compose up -d --build
+#   应用     http://localhost:8080/actuator/health
+#   指标     http://localhost:8080/actuator/prometheus
+#   Prometheus http://localhost:9091   ← 宿主机端口避开 9090：
+#     clash/mihomo 的 external-controller 常占用 9090，容器内仍是标准 9090
+#   Grafana    http://localhost:3000  (admin / admin)
+#
+# 面试官问「你本地怎么跑」时，答案就是这一条命令 —— 不是「起个 kind 集群」。
+
+name: order-demo
+
+services:
+
+  postgres:
+    image: postgres:17-alpine
+    container_name: order-demo-postgres
+    environment:
+      POSTGRES_DB: orders
+      POSTGRES_USER: orders
+      POSTGRES_PASSWORD: orders
+      # 本地开发用 trust 之外最简单的方式；生产走 Secret，见 k8s/base/
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # 用 pg_isready 而不是 tcp 探测：端口通了不代表数据库能接受查询
+      test: ["CMD-SHELL", "pg_isready -U orders -d orders"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: order-demo-api
+    depends_on:
+      postgres:
+        # service_started 只保证容器起来了，不保证数据库能连。
+        # 用 service_healthy 等健康检查通过，否则应用启动时 Flyway 会连不上库直接失败。
+        condition: service_healthy
+    environment:
+      DB_URL: jdbc:postgresql://postgres:5432/orders
+      DB_USERNAME: orders
+      DB_PASSWORD: orders
+      LOG_LEVEL: INFO
+      # 本地默认关闭故障注入。想看回滚演示时改成 true 并把 FAULT_ERROR_RATE 调到 0.5
+      FAULT_ENABLED: "false"
+      FAULT_ERROR_RATE: "0.0"
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/actuator/health/liveness || exit 1"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 40s
+    # 让 JVM 看到容器的内存上限。compose 里 limits 与 JAVA_TOOL_OPTIONS 的
+    # MaxRAMPercentage 配合，才是「容器感知」的完整链路。
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+    stop_grace_period: 35s   # 必须大于 spring.lifecycle.timeout-per-shutdown-phase
+
+  prometheus:
+    image: prom/prometheus:v3.15.0
+    container_name: order-demo-prometheus
+    depends_on:
+      - app
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/prometheus/alert-rules.yml:/etc/prometheus/alert-rules.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=7d'
+      # 打开生命周期接口，配置热重载时不用重启容器
+      - '--web.enable-lifecycle'
+    ports:
+      # 容器内仍是 9090（Prometheus 标准端口，配置与文档都按它写），
+      # 宿主机映射成 9091：9090 经常被 clash/mihomo 的 external-controller 占用，
+      # 直接映射 9090 会得到 "address already in use" 且错误信息不提示来源。
+      - "9091:9090"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9090/-/healthy || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  grafana:
+    image: grafana/grafana:13.2.4
+    container_name: order-demo-grafana
+    depends_on:
+      - prometheus
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      # 本地演示免登录，省去每次输密码
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+
+volumes:
+  postgres-data:
+  prometheus-data:
+  grafana-data:
