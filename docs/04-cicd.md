@@ -94,11 +94,11 @@ GitHub 的 `ubuntu-latest` runner 自带 Docker，Testcontainers 能直接起 Po
 
 阈值不搞一刀切：全局行 ≥ 80%、分支 ≥ 70%，同时**分模块卡 60%**。只看全局会被平均掉 —— 一个 100% 覆盖的模块可以掩盖另一个 0% 覆盖的模块。
 
-### `dorny/test-reporter` 的 glob：必须覆盖两个目录，且必须是单行
+### `dorny/test-reporter` 的 glob：必须覆盖两个目录，且用【逗号】分隔
 
 ```yaml
-# 正确写法：一个 brace 展开的 glob
-path: '**/target/{surefire-reports,failsafe-reports}/TEST-*.xml'
+# v3 的正确写法：逗号分隔
+path: '**/target/surefire-reports/TEST-*.xml,**/target/failsafe-reports/TEST-*.xml'
 ```
 
 | 只写 surefire | 两个都覆盖（本仓库） |
@@ -108,26 +108,24 @@ path: '**/target/{surefire-reports,failsafe-reports}/TEST-*.xml'
 
 这个疏漏的**症状具有欺骗性**：报告里有一堆绿色用例，看起来测试跑得挺好，只是「IT 没显示出来」而已。实际上 IT 可能正在失败 —— 你只是没在报告里看到它。
 
-**为什么必须写成单行**：直觉上会写成 YAML 多行块：
+**为什么是逗号而不是换行**：v3 的源码里写得很清楚：
 
-```yaml
-path: |
-  **/target/surefire-reports/TEST-*.xml
-  **/target/failsafe-reports/TEST-*.xml
+```ts
+// dorny/test-reporter v3  src/main.ts
+const pathsList = this.path.split(',')
 ```
 
-但 v3 内部用 fast-glob 解析，实测会把这个多行字符串当成**一个带换行的路径**，
-CI 直接报：
+**v2 用换行分隔，v3 改成了逗号。** 照搬老配置会静默失效，两种错法都实测踩过：
 
-```
-##[warning]No file matches path **/target/surefire-reports/TEST-*.xml
-**/target/failsafe-reports/TEST-*.xml
-##[error]No test report files were found
-```
+| 写法 | 实际行为 | CI 报错 |
+|---|---|---|
+| YAML 多行块 | 整段被当成**一个含换行的模式** | `No file matches path **/target/surefire-reports/TEST-*.xml`<br>`**/target/failsafe-reports/TEST-*.xml`（两行原样拼在一起） |
+| `{surefire-reports,failsafe-reports}` | 花括号里的**逗号反而把模式切成两段**无效路径 | 同样 no file matches |
+| 逗号分隔两个完整 glob | 正确 | — |
 
-注意报错把两行原样拼在一起 —— 这就是「被当成一个模式」的直接证据。
-换成 brace 展开后一次通过。fast-glob 的 `{}` 语法本来就支持多选，
-不需要依赖换行分隔。
+**教训**：第三方 action 的输入解析规则要去看源码或 action.yml，
+不要凭「我见过这种写法」或上一版的记忆。这类问题不会报配置错误，
+只会表现成「文件找不到」——而文件明明就在那里。
 
 `fail-on-error: false` 也是刻意的：这一步的职责是「呈现」，不是「判定」。判定已经由 `mvn verify` 做过了，让它再失败一次只会让「哪一步才是真正的失败点」变模糊。
 
