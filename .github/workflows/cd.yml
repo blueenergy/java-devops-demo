@@ -188,8 +188,9 @@ jobs:
           for i in $(seq 1 24); do
             PHASE=$(kubectl -n "${NAMESPACE}" get rollout order-demo-api \
               -o jsonpath='{.status.phase}' 2>/dev/null || echo "-")
+            # 注意路径是 .status.currentStepIndex（顶层），不是 .status.canary...
             STEP=$(kubectl -n "${NAMESPACE}" get rollout order-demo-api \
-              -o jsonpath='{.status.canary.currentStepIndex}' 2>/dev/null || echo "-")
+              -o jsonpath='{.status.currentStepIndex}' 2>/dev/null || echo "-")
             UPDATED=$(kubectl -n "${NAMESPACE}" get rollout order-demo-api \
               -o jsonpath='{.status.updatedReplicas}' 2>/dev/null || echo "-")
             READY=$(kubectl -n "${NAMESPACE}" get rollout order-demo-api \
