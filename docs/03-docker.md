@@ -105,6 +105,24 @@ FROM eclipse-temurin:21-jre-alpine
 | `21-jre` 而不是 `21-jdk` | 运行不需要编译器，JDK 镜像多出几百 MB 且多一批可被利用的工具 |
 | `alpine` | 基础镜像小；代价是 BusyBox 工具集与 glibc 的差异（用 musl） |
 
+### 为什么要 `apk upgrade`
+
+```dockerfile
+RUN apk upgrade --no-cache
+```
+
+**基础镜像的 tag 不会自动带上游补丁。** `eclipse-temurin:21-jre-alpine`
+指向的 Alpine 快照在你拉取的那一刻就冻住了；Alpine 上游之后发布的安全补丁
+（本项目撞到的是 `libexpat` 2.8.5-r0 → 2.9.0-r0，CVE-2026-77214）
+不会自动进到镜像里。镜像扫描会如实把它报成 HIGH。
+
+`apk upgrade` 是在**不更换基础镜像**的前提下消费上游补丁的标准做法。
+
+**代价要说清楚**：同一 tag 在不同时间构建，包版本可能不同，
+构建不再是完全可复现的。追求绝对可复现的做法是自己维护一个
+定期重建的基础镜像，并把 digest 钉死在 Dockerfile 里 ——
+这是「安全补丁」与「构建可复现」之间的真实取舍，没有免费的答案。
+
 ### alpine 没有 `useradd`
 
 ```dockerfile

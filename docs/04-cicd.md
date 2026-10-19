@@ -184,6 +184,46 @@ org.postgresql:postgresql │ CVE-2026-54291 │ HIGH │ fixed │ 42.7.11 → 
 > 这也是「为什么依赖扫描不能省」的最好论据：没有这道门禁，
 > 这个 HIGH 漏洞会一直躺在生产镜像里，直到某天被外部扫描或审计发现。
 
+### 镜像扫描暴露的完整处置矩阵
+
+依赖扫描只看得到 `pom.xml` 里的库；**镜像扫描还能看到基础镜像里的 OS 包**，
+以及打进 fat jar 的所有传递依赖。首次跑镜像扫描时一次性暴露了 5 类问题，
+正好覆盖了「漏洞处置」的全部情形：
+
+| 漏洞 | 位置 | 严重度 | 处置 | 方式 |
+|---|---|---|---|---|
+| `libexpat` CVE-2026-77214 | alpine 3.24.2 系统包 | HIGH | **可修** | Dockerfile 加 `apk upgrade --no-cache` |
+| `jackson-core/databind` ×4 | app.jar | HIGH | **可修** | import `jackson-bom:2.21.8`（放在 Boot BOM 之前） |
+| `tomcat-embed-core` ×3 | app.jar | **CRITICAL** | **可修** | 显式管理 3 个 tomcat-embed artifact → 10.1.61 |
+| `spring-webmvc` CVE-2026-47884 / 47890 | app.jar | **CRITICAL** | **当前大版本内不可修** | `.trivyignore` + 可达性分析 |
+
+四条经验：
+
+**第一，基础镜像的 tag 不会自动带上游补丁。** `eclipse-temurin:21-jre-alpine`
+指向的 Alpine 快照在发布时冻结，上游后来修的 `libexpat` 不会自动进来。
+`apk upgrade` 是标准做法，代价是构建不再完全可复现 —— 这是安全与可复现之间的取舍。
+
+**第二，覆盖 BOM 管理的版本要看 import 顺序。** 多个 BOM 定义同一 artifact 时
+**先声明的优先**，所以 `jackson-bom` 必须放在 `spring-boot-dependencies` 之前。
+顺序写反了不会报错，只会静默用回旧版本。
+
+**第三，漏洞库给的「Fixed Version」可能不存在。** Trivy 说 Tomcat 修在
+`10.1.58`，但 Maven Central 上 10.1.58 被跳过了，实际最新是 `10.1.61`。
+照抄会 404 —— **必须以仓库实际可用版本为准**。
+
+**第四，不是所有漏洞都能在当前大版本内修掉。** `spring-webmvc` 的两个
+CRITICAL 只在 Spring Framework 7 / Boot 4 修复，而 Boot 3.5.16 已是 3.x 线最新。
+这时正确做法不是关掉扫描，也不是假装看不见，而是：
+
+1. 写进 `.trivyignore`，**每条都带三个问题的答案**：为什么修不了、路径是否可达、何时重评
+2. 做**可达性分析**：这两个 CVE 分别影响 `XsltView` 和 SSE，
+   本项目是纯 REST 服务，两者都不可达
+3. 记录**补偿措施与失效条件**：一旦引入视图解析或 SSE，例外立即失效
+
+> 面试里这段比"我把扫描配通了"值钱得多。它证明你能在
+> 「安全要求」与「工程现实」之间做有依据的权衡，
+> 而不是要么无脑修、要么无脑 ignore。
+
 ### 为什么用 `format: table` 而不是 `sarif`
 
 | 维度 | `table` + `exit-code`（本仓库） | `sarif` |

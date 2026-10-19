@@ -65,6 +65,22 @@ LABEL org.opencontainers.image.title="order-demo-api" \
       org.opencontainers.image.base.name="eclipse-temurin:21-jre-alpine"
 
 # ------------------------------------------------------------------
+# 升级基础镜像里的系统包。
+#
+# 为什么需要这一步：基础镜像 tag（eclipse-temurin:21-jre-alpine）指向的
+# Alpine 版本在发布时冻结了包快照。之后 Alpine 上游发布了安全补丁
+# （例如 libexpat 2.8.5-r0 → 2.9.0-r0，CVE-2026-77214），
+# 只要你继续用同一个 tag，镜像里就一直是旧版本 ——
+# 而镜像漏洞扫描会把它当作 HIGH 报出来。
+#
+# apk upgrade 是在「不换基础镜像」前提下消费上游安全补丁的标准做法。
+# 代价：镜像构建不再是完全可复现的（同一 tag 在不同时间构建，包版本可能不同）。
+# 这是安全性与可复现性之间的取舍；追求绝对可复现的做法是
+# 自己维护一个定期重建的基础镜像，并把 digest 固定下来。
+# ------------------------------------------------------------------
+RUN apk upgrade --no-cache
+
+# ------------------------------------------------------------------
 # 非 root 运行。
 # alpine 用的是 BusyBox，没有 useradd/groupadd，必须用 addgroup/adduser。
 # 直接用 useradd 会报 "useradd: not found"。

@@ -168,7 +168,9 @@ java-demo-parent
 
 **`dorny/test-reporter` v3 的 `path` 用逗号分隔，不是换行。** v2 是换行，v3 源码里是 `this.path.split(',')`。照搬老配置会静默失效，只报 `No file matches path`——而文件明明就在那里。`{a,b}` 花括号写法也会被逗号切开，同样失效。
 
-**Trivy 真的拦下了一个 HIGH 漏洞。** Boot 3.5.16 BOM 管理的 PostgreSQL 驱动 42.7.11 有 `CVE-2026-54291`（SCRAM 降级导致中间人防护失效）。在父 POM 里显式覆盖成 42.7.14 解决——BOM 统一管理不代表无懈可击。
+**Trivy 真的拦下了漏洞，而且不止一个。** 依赖扫描拦下 PostgreSQL 驱动 42.7.11 的 `CVE-2026-54291`（HIGH）；镜像扫描进一步暴露出 5 类问题：基础镜像的 `libexpat`（HIGH）、Jackson 4 个 DoS（HIGH）、Tomcat 3 个 CRITICAL、以及两个**只能在 Boot 4 修复**的 Spring CRITICAL。前几类已经在父 POM / Dockerfile 里修掉；最后两个写进 `.trivyignore` 并附可达性分析（分别影响 `XsltView` 与 SSE，本项目纯 REST 均不可达）。处置矩阵见 [04-cicd](docs/04-cicd.md)。
+
+**漏洞库给的修复版本可能不存在。** Trivy 说 Tomcat 修在 `10.1.58`，但 Maven Central 上这个版本被跳过了，实际最新是 `10.1.61`。照抄会 404——必须以仓库实际可用版本为准。
 
 ---
 
