@@ -380,11 +380,14 @@ indent_size = 4
 | 症状 | 大概率原因 |
 |---|---|
 | 「运行单元测试与集成测试」红，日志里有容器启动失败 | Testcontainers 拉镜像失败或 Docker daemon 不可用 |
-| 「覆盖率门禁」红，且报告为空 | `demo-coverage` 没拿到 `jacoco.exec`；常见根因见 `03-docker.md` 里关于 `repackage` 的现状核对 |
+| 「覆盖率门禁」红，且报告为空 | `demo-coverage` 没拿到 `jacoco.exec`；最常见根因是 `repackage` 没执行、主 artifact 被 fat jar 替换，见 `03-docker.md` 的踩坑复盘 |
 | 「覆盖率门禁」红，提示「未找到 `<group>` 节点」 | JaCoCo 版本变化导致聚合报告 XML 结构变了 |
 | 测试报告里只有单测、没有 IT | `dorny/test-reporter` 的 `path` 少了 `failsafe-reports` |
 | 「清单校验」红，报 `Rollout` 找不到 schema | 少了 `-ignore-missing-schemas` |
 | 构建特别慢但缓存看起来是开的 | `setup-java` 的 `cache: maven` 与手写的 `actions/cache` 撞路径了 |
+| 「镜像扫描」红，报 `cannot find ignorefile '.trivyignore'` | 该 job **没有 checkout**，工作区里没有仓库文件。加一步 `actions/checkout` |
+| 「镜像扫描」红，报某个 CVE 在 `Fixed Version` 里但装不上 | 漏洞库给的版本可能未发布（如 Tomcat 10.1.58 在 Central 被跳过），以仓库实际可用版本为准 |
+| CD 红在「安装 Argo Rollouts」，报 `metadata.annotations: Too long` | CRD 超过 256KB，`kubectl apply` 的 last-applied 注解超限，改用 `--server-side` |
 
 ## 与 CD 的衔接
 

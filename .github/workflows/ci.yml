@@ -313,6 +313,13 @@ jobs:
       contents: read
       packages: read
     steps:
+      # 必须检出代码：这个 job 表面上是「扫镜像」，但 trivy 需要读取仓库里的
+      # .trivyignore 例外清单。少了 checkout，工作区里没有这个文件，
+      # 报错是 `ERROR: cannot find ignorefile '.trivyignore'.`
+      # —— 看起来像扫描配置问题，实际是缺了一步 checkout。
+      - name: 检出代码
+        uses: actions/checkout@v7
+
       - name: 登录 GHCR
         uses: docker/login-action@v4
         with:
