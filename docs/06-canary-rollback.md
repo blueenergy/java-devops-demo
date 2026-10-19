@@ -333,7 +333,7 @@ Rollout 转为 Degraded
 
 | 文件 | 判定方式 | 适用场景 |
 |---|---|---|
-| `k8s/rollout/analysis-job.yaml` | Job 退出码 | **任何环境**，尤其无流量时 |
+| `k8s/base/analysis-job.yaml` | Job 退出码 | **任何环境**，尤其无流量时 |
 | `k8s/rollout/analysis-prometheus.yaml` | PromQL 查询 | 有真实流量 + Prometheus |
 
 Prometheus 版里三个指标缺一不可：

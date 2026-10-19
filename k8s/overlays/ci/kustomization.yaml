@@ -14,8 +14,10 @@ namespace: order-demo
 resources:
   - ../../base
 
-commonLabels:
-  env: ci
+labels:
+  - pairs:
+      env: ci
+    includeSelectors: false
 
 # kind load docker-image 把镜像直接塞进节点，不需要 registry。
 # 用 :ci 这个 tag 与本地开发用的 :local 区分开。
@@ -24,20 +26,53 @@ images:
     newName: order-demo-api
     newTag: ci
 
-replicas:
-  - name: order-demo-api
-    count: 1
-
+# 副本数用 patch 而不是 replicas: —— 后者不匹配 Rollout 这个 CRD，
+# 渲染期就会报 "does not match a config with GVK [Deployment ...]"
 patches:
-  # kind 的 kindnet 不支持 NetworkPolicy，去掉避免误导
+  - target:
+      group: argoproj.io
+      version: v1alpha1
+      kind: Rollout
+      name: order-demo-api
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
+
+  # kind 的 kindnet 不实现 NetworkPolicy，去掉避免误导。
+  # 注意每个删除 patch 都必须写【准确的资源名】：
+  # $patch: delete 是按 apiVersion/kind/name 精确匹配的，
+  # 写一个不存在的名字（比如占位的 "unused"）会导致
+  # "no matches for Id ..." 渲染失败。
   - target:
       kind: NetworkPolicy
+      name: default-deny-ingress
     patch: |-
       $patch: delete
       apiVersion: networking.k8s.io/v1
       kind: NetworkPolicy
       metadata:
-        name: unused
+        name: default-deny-ingress
+
+  - target:
+      kind: NetworkPolicy
+      name: order-demo-api-allow-ingress
+    patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: order-demo-api-allow-ingress
+
+  - target:
+      kind: NetworkPolicy
+      name: order-demo-api-allow-egress-postgres
+    patch: |-
+      $patch: delete
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: order-demo-api-allow-egress-postgres
 
   # 单副本下 PDB 的 minAvailable: 2 永远无法满足，
   # 会让任何节点排水操作被无限阻塞

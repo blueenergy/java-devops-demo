@@ -94,7 +94,21 @@ GitHub 的 `ubuntu-latest` runner 自带 Docker，Testcontainers 能直接起 Po
 
 阈值不搞一刀切：全局行 ≥ 80%、分支 ≥ 70%，同时**分模块卡 60%**。只看全局会被平均掉 —— 一个 100% 覆盖的模块可以掩盖另一个 0% 覆盖的模块。
 
-### `dorny/test-reporter` 的 glob 必须覆盖两个目录
+### `dorny/test-reporter` 的 glob：必须覆盖两个目录，且必须是单行
+
+```yaml
+# 正确写法：一个 brace 展开的 glob
+path: '**/target/{surefire-reports,failsafe-reports}/TEST-*.xml'
+```
+
+| 只写 surefire | 两个都覆盖（本仓库） |
+|---|---|
+| 单元测试结果可见 | 单元测试 + 集成测试结果都可见 |
+| **集成测试的失败在报告里完全看不到** | 集成测试失败会出现在同一个列表里 |
+
+这个疏漏的**症状具有欺骗性**：报告里有一堆绿色用例，看起来测试跑得挺好，只是「IT 没显示出来」而已。实际上 IT 可能正在失败 —— 你只是没在报告里看到它。
+
+**为什么必须写成单行**：直觉上会写成 YAML 多行块：
 
 ```yaml
 path: |
@@ -102,12 +116,18 @@ path: |
   **/target/failsafe-reports/TEST-*.xml
 ```
 
-| 只写 surefire | 两个都写（本仓库） |
-|---|---|
-| 单元测试结果可见 | 单元测试 + 集成测试结果都可见 |
-| **集成测试的失败在报告里完全看不到** | 集成测试失败会出现在同一个列表里 |
+但 v3 内部用 fast-glob 解析，实测会把这个多行字符串当成**一个带换行的路径**，
+CI 直接报：
 
-这个疏漏的**症状具有欺骗性**：报告里有一堆绿色用例，看起来测试跑得挺好，只是「IT 没显示出来」而已。实际上 IT 可能正在失败 —— 你只是没在报告里看到它。
+```
+##[warning]No file matches path **/target/surefire-reports/TEST-*.xml
+**/target/failsafe-reports/TEST-*.xml
+##[error]No test report files were found
+```
+
+注意报错把两行原样拼在一起 —— 这就是「被当成一个模式」的直接证据。
+换成 brace 展开后一次通过。fast-glob 的 `{}` 语法本来就支持多选，
+不需要依赖换行分隔。
 
 `fail-on-error: false` 也是刻意的：这一步的职责是「呈现」，不是「判定」。判定已经由 `mvn verify` 做过了，让它再失败一次只会让「哪一步才是真正的失败点」变模糊。
 
@@ -134,6 +154,37 @@ exit-code: '1'
 severity: 'CRITICAL,HIGH'
 ignore-unfixed: true
 ```
+
+### 这个门禁真拦下了一次（不是理论）
+
+首次跑 CI 时被它拦住了，报的是：
+
+```
+org.postgresql:postgresql │ CVE-2026-54291 │ HIGH │ fixed │ 42.7.11 → 42.7.12
+  "Man-in-the-middle protection bypass via SCRAM-SHA-256-PLUS downgrade"
+```
+
+42.7.11 正是 Spring Boot 3.5.16 BOM 管理的版本 —— **BOM 统一管理的依赖也会带 CVE**，
+而且你没有任何感知。
+
+修法是在父 POM 的 `dependencyManagement` 里显式覆盖：
+
+```xml
+<dependency>
+  <groupId>org.postgresql</groupId>
+  <artifactId>postgresql</artifactId>
+  <version>42.7.14</version>
+</dependency>
+```
+
+显式条目优先于 import 进来的 BOM，不需要升整个 Boot 版本。
+
+**这暴露了 BOM 统一版本的真实代价**：集中管理省掉了版本冲突，但单个依赖的
+紧急安全修复必须显式覆盖，否则要等下一个 Boot patch 发布。
+判断标准：安全修复等不起就覆盖，功能升级可以等。
+
+> 这也是「为什么依赖扫描不能省」的最好论据：没有这道门禁，
+> 这个 HIGH 漏洞会一直躺在生产镜像里，直到某天被外部扫描或审计发现。
 
 ### 为什么用 `format: table` 而不是 `sarif`
 

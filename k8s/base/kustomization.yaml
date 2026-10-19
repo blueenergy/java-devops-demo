@@ -17,8 +17,14 @@ kind: Kustomization
 
 namespace: order-demo
 
-commonLabels:
-  app.kubernetes.io/part-of: order-demo
+# 用 labels 而不是已废弃的 commonLabels。
+# includeSelectors: false 是刻意的 —— Service/Rollout 的 selector 是不可变字段，
+# 若让 overlay 的环境标签进入 selector，同一集群切换 overlay 会报
+# "field is immutable"。标签用于查询与选择，不该用于区分环境。
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: order-demo
+    includeSelectors: false
 
 resources:
   - namespace.yaml
@@ -28,6 +34,12 @@ resources:
   - postgres.yaml
   - service.yaml
   - rollout.yaml
+  # Rollout 的 canary steps 引用了 AnalysisTemplate order-demo-api-smoke。
+  # 少了它，金丝雀走到分析这一步会直接报 "analysistemplate not found"，
+  # 而 Rollout 本身能正常创建 —— 又是一个「静态看没问题、运行到某一步才炸」的场景。
+  # analysis-prometheus.yaml 不放进 base：它依赖 Prometheus 与真实流量，
+  # 在有对应环境时按需 apply，见 docs/06-canary-rollback.md。
+  - analysis-job.yaml
   - hpa.yaml
   - pdb.yaml
   - networkpolicy.yaml

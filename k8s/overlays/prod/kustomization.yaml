@@ -14,8 +14,10 @@ namespace: order-demo-prod
 resources:
   - ../../base
 
-commonLabels:
-  env: prod
+labels:
+  - pairs:
+      env: prod
+    includeSelectors: false
 
 # ------------------------------------------------------------------
 # 【重要】生产按 digest 部署，不按 tag。
@@ -39,11 +41,19 @@ images:
     # 用 digest 时 newTag 必须省略 —— 同时指定 tag 和 digest 会报错。
     digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
 
-replicas:
-  - name: order-demo-api
-    count: 3
-
+# 副本数用 patch 而不是 replicas: 字段 —— 后者只匹配内置工作负载，
+# 对 Argo Rollouts 的 Rollout（CRD）会直接渲染失败，详见 overlays/dev 的说明。
 patches:
+  - target:
+      group: argoproj.io
+      version: v1alpha1
+      kind: Rollout
+      name: order-demo-api
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 3
+
   # 拓扑分布：同一可用区最多 2 个副本，同一节点最多 1 个。
   # 不做这个约束时，调度器可能把 3 个副本全放到一个节点上 ——
   # 那个节点一挂，服务就整体不可用，多副本的意义荡然无存。

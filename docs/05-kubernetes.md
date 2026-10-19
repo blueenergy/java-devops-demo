@@ -52,7 +52,7 @@ steps:
 
 生产环境要精确控流**必须接入 `trafficRouting`**。这里选择不接，是为了让 demo 不依赖特定的 Ingress 实现，能在任何 kind 集群里跑起来。
 
-分析的判定用 **Job 探测**（`k8s/rollout/analysis-job.yaml`）而不是 Prometheus 查错误率：演示环境金丝雀期间**没有真实用户流量**，错误率的分母是 0，PromQL 返回空集，`AnalysisRun` 判 `Inconclusive` 并一直重试到超时 —— 表面看「回滚了」，实际是「探测没结果所以超时了」。两者的故障定位路径和回滚触发条件完全不同。
+分析的判定用 **Job 探测**（`k8s/base/analysis-job.yaml`）而不是 Prometheus 查错误率：演示环境金丝雀期间**没有真实用户流量**，错误率的分母是 0，PromQL 返回空集，`AnalysisRun` 判 `Inconclusive` 并一直重试到超时 —— 表面看「回滚了」，实际是「探测没结果所以超时了」。两者的故障定位路径和回滚触发条件完全不同。
 
 ## 三类探针的分工
 

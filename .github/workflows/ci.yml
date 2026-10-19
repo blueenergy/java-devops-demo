@@ -177,7 +177,7 @@ jobs:
       #   默认源是 raw.githubusercontent.com，在部分网络环境下会被重置
       #   （国内自建 runner 就会遇到），jsdelivr 的 fastly 节点可达性更好。
       #   两个源指向同一份 schema 仓库，内容一致。
-      - name: kubeconform schema 校验
+      - name: kubeconform schema 校验（base 与 rollout）
         run: |
           docker run --rm -v "$PWD/k8s:/m:ro" ghcr.io/yannh/kubeconform:v0.8.0 \
             -strict -summary -ignore-missing-schemas \
@@ -185,6 +185,30 @@ jobs:
             -schema-location 'https://fastly.jsdelivr.net/gh/yannh/kubernetes-json-schema@master/{{.NormalizedKubernetesVersion}}-standalone{{.StrictSuffix}}/{{.ResourceKind}}{{.KindSuffix}}.json' \
             -schema-location default \
             /m/base /m/rollout
+
+      # 渲染后再校验一次最终产物。
+      #
+      # 这一步能抓到静态校验抓不到的一类错误：Kustomize 自身在渲染期的失败。
+      # 真实案例：kustomization 的 replicas: 字段只匹配内置工作负载
+      # （Deployment/StatefulSet/...），而我们用的是 Argo Rollouts 的 Rollout（CRD），
+      # 三个 overlay 全部渲染失败，但单个 YAML 文件的 schema 校验全绿。
+      #
+      # kubectl 内置 kustomize，runner 上无需额外安装。
+      - name: 渲染 overlay 并校验最终产物
+        run: |
+          set -euo pipefail
+          for overlay in dev prod ci; do
+            echo "::group::overlays/$overlay"
+            kubectl kustomize "k8s/overlays/$overlay" > "/tmp/render-${overlay}.yaml"
+            docker run --rm -v "/tmp/render-${overlay}.yaml:/m.yaml:ro" \
+              ghcr.io/yannh/kubeconform:v0.8.0 \
+              -strict -summary -ignore-missing-schemas \
+              -kubernetes-version 1.31.0 \
+              -schema-location 'https://fastly.jsdelivr.net/gh/yannh/kubernetes-json-schema@master/{{.NormalizedKubernetesVersion}}-standalone{{.StrictSuffix}}/{{.ResourceKind}}{{.KindSuffix}}.json' \
+              -schema-location default \
+              /m.yaml
+            echo "::endgroup::"
+          done
 
   # ==================================================================
   # Job 4：构建并推送镜像
